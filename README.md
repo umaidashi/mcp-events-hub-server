@@ -82,7 +82,7 @@ webhook を選ぶと、拡張は最初の購読で 127.0.0.1 に HTTP サーバ�
 
 - `npm test` は 31 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
 - `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。
-  - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。
+  - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。リポジトリ直下の `.env`(git 管理外)に `ANTHROPIC_API_KEY=sk-ant-...` と書き、`npm run demo` で実行します。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。
   - `PI_DEMO_DELIVERY=push|poll|webhook|all` で方式を絞れます。`PI_DEMO_MODEL=openai-codex/gpt-5.6-luna` のように Anthropic 以外を指定すると、`~/.pi/agent` のログイン情報を使います。
 
 ## まだやっていないこと
