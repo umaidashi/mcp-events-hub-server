@@ -44,22 +44,26 @@ export const shop: ServiceRegistration = {
   ],
 };
 
-export async function registerShop(hubUrl: string, adminToken: string): Promise<{ secret: string; events: string[] }> {
-  const res = await fetch(`${hubUrl}/services/shop`, {
+export async function registerService(
+  hubUrl: string, adminToken: string, id: string, registration: ServiceRegistration,
+): Promise<{ secret: string; events: string[] }> {
+  const res = await fetch(`${hubUrl}/services/${id}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
-    body: JSON.stringify(shop),
+    body: JSON.stringify(registration),
   });
   const body = await res.json();
   if (!res.ok) throw new Error(`registration failed (${res.status}): ${JSON.stringify(body)}`);
   return { secret: body.secret, events: body.events };
 }
 
+export const registerShop = (hubUrl: string, adminToken: string) => registerService(hubUrl, adminToken, "shop", shop);
+
 export async function emit(
-  hubUrl: string, secret: string, name: string, data: Record<string, unknown>, eventId?: string,
+  hubUrl: string, secret: string, name: string, data: Record<string, unknown>, eventId?: string, serviceId = "shop",
 ): Promise<{ status: number; body: unknown }> {
   const body = JSON.stringify({ name, data, eventId });
-  const res = await fetch(`${hubUrl}/services/shop/events`, {
+  const res = await fetch(`${hubUrl}/services/${serviceId}/events`, {
     method: "POST",
     headers: signedHeaders(secret, eventId ?? `msg_${randomUUID()}`, body),
     body,

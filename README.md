@@ -6,7 +6,7 @@
 
 ハブ本体は Web 標準の `Request` と `Response` を受け渡す 1 つの fetch ハンドラ(`src/hub.ts`)です。同じコードを Node.js(`src/node.ts`)と Cloudflare Workers の Durable Object(`src/worker.ts`)で動かします。Node.js で動かすときの依存パッケージはなく、Node.js 24 以上で `.ts` をそのまま実行します。Cloudflare 向けの開発とビルドには devDependencies の `cf`、`@cloudflare/vite-plugin`、`vite` を使います。
 
-このリポジトリには、ハブのほかに 2 つの役割の実装が入っています。`mock/service.ts` は上流サービスの見本で、shop サービスを登録して注文イベントを送ります。`pi/mcp-events.ts` は [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) の拡張で、ハブのイベントを購読し、届くたびに pi の新しいターンを始めます。
+このリポジトリには、ハブのほかに 2 つの役割の実装が入っています。`mock/service.ts` は上流サービスの見本で、shop サービスを登録して注文イベントを送ります。`mock/api-server.ts` も上流サービスの見本で、5xx を返すたびにエラーイベントを送る小さな HTTP API です。`pi/mcp-events.ts` は [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) の拡張で、ハブのイベントを購読し、届くたびに pi の新しいターンを始めます。
 
 設計と使い方を図にしたページは [`docs/mcp-events-hub.html`](docs/mcp-events-hub.html) です。ブラウザで直接開けます。
 
@@ -22,7 +22,7 @@ C4 モデルのレベル1から3(コンテキスト、コンテナ、コンポ�
 flowchart LR
   user["<b>利用者</b><br/>[Person]<br/>購読するイベントと、届いたときの指示をエージェントに頼む"]
   operator["<b>運用者</b><br/>[Person]<br/>サービスを登録し、購読の状況を確かめる"]
-  service["<b>上流サービス</b><br/>[Software System]<br/>shop など。自分のイベントを登録して送る"]
+  service["<b>上流サービス</b><br/>[Software System]<br/>shop や api など。自分のイベントを登録して送る"]
   hub["<b>MCP Events Hub</b><br/>[Software System]<br/>全サービスのイベントを1つのカタログにまとめ、購読者へ中継する MCP サーバー"]
   agent["<b>クライアントエージェント</b><br/>[Software System]<br/>pi とこのリポジトリの拡張、ChatGPT、他の MCP クライアント"]
   llm["<b>LLM プロバイダ</b><br/>[Software System]<br/>Anthropic API など"]
@@ -49,7 +49,7 @@ MCP Events Hub と、このリポジトリが提供するクライアント側�
 ```mermaid
 flowchart LR
   operator["<b>運用者</b><br/>[Person]"]
-  service["<b>上流サービス</b><br/>[Software System]<br/>モックは mock/service.ts"]
+  service["<b>上流サービス</b><br/>[Software System]<br/>モックは mock/service.ts と mock/api-server.ts"]
   chatgpt["<b>ChatGPT など</b><br/>[Software System]<br/>webhook を受け取る MCP クライアント"]
 
   subgraph hubSystem["MCP Events Hub [Software System]"]
@@ -147,8 +147,10 @@ flowchart LR
     dHub["<b>hub</b><br/>[Container: src/node.ts]<br/>127.0.0.1:8787 に公開"]
     dDb[("<b>hub-data</b><br/>[Container: SQLite のボリューム]")]
     dService["<b>service</b><br/>[Container: mock/service.ts]<br/>登録してから注文を送り続ける"]
+    dApi["<b>api</b><br/>[Container: mock/api-server.ts]<br/>127.0.0.1:8788 に公開。5xx をエラーイベントとして送る"]
     dClient["<b>client / check</b><br/>[Container: pi と拡張]<br/>webhook の受け口は :9100"]
     dService -- "登録と送信" --> dHub
+    dApi -- "登録と送信" --> dHub
     dClient -- "MCP" --> dHub
     dHub -- "webhook" --> dClient
     dHub -- "SQL" --> dDb
@@ -165,7 +167,7 @@ flowchart LR
   end
 
   classDef container fill:#438dd5,stroke:#2e6295,color:#fff
-  class nodeEntry,nodeDb,cfHub,cfDb,dHub,dDb,dService,dClient container
+  class nodeEntry,nodeDb,cfHub,cfDb,dHub,dDb,dService,dApi,dClient container
 ```
 
 ## 必要なもの
@@ -186,6 +188,7 @@ flowchart LR
 |---|---|---|
 | `hub` | ハブ(`src/node.ts`)。コンテナ内の 0.0.0.0:8787 で待ち受け、ホストの 127.0.0.1:8787 に公開する。SQLite は名前付きボリューム `hub-data` に置く | `docker compose up` |
 | `service` | モックの shop サービス(`mock/service.ts`)。起動時に shop を登録し、3 秒ごとに alice か bob の注文を送る | `docker compose up` |
+| `api` | モックの HTTP API(`mock/api-server.ts`)。起動時に api を登録し、ホストの 127.0.0.1:8788 に公開する。5xx を返すたびに `api.error.occurred` を送る | `docker compose up` |
 | `client` | pi と拡張。拡張はこのリポジトリを `pi install /app` で pi のパッケージとして入れてある | `docker compose run` |
 | `check` | `client` と同じイメージで `scripts/pi-demo.ts` を実行し、3 つの配信方式を実際の LLM で確かめる | `docker compose run` |
 
@@ -199,7 +202,7 @@ flowchart LR
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 ```
 
-compose はこのファイルを `compose.yaml` の `${...}` の置き換えにだけ使います。キーを渡すのは `client` と `check` のコンテナだけで、`hub` と `service` のコンテナには渡りません。キーはイメージにも入りません。
+compose はこのファイルを `compose.yaml` の `${...}` の置き換えにだけ使います。キーを渡すのは `client` と `check` のコンテナだけで、`hub`、`service`、`api` のコンテナには渡りません。キーはイメージにも入りません。
 
 ### 2. イメージを作る
 
@@ -207,7 +210,7 @@ compose はこのファイルを `compose.yaml` の `${...}` の置き換えに�
 docker compose --profile client --profile check build
 ```
 
-hub と service のイメージは `node:24-slim` にソースをコピーしただけで、npm install をしません。client のイメージは pi 1.3.0 を `npm install -g` で入れ、続けて `pi install /app` で拡張を入れます。pi の設定ディレクトリはイメージ内の `/home/node/.pi/agent`(`PI_CODING_AGENT_DIR`)で、ホストの `~/.pi` は読みません。どのコンテナも `node` ユーザーで動きます。
+hub、service、api のイメージは `node:24-slim` にソースをコピーしただけで、npm install をしません。client のイメージは pi 1.3.0 を `npm install -g` で入れ、続けて `pi install /app` で拡張を入れます。pi の設定ディレクトリはイメージ内の `/home/node/.pi/agent`(`PI_CODING_AGENT_DIR`)で、ホストの `~/.pi` は読みません。どのコンテナも `node` ユーザーで動きます。
 
 社内プロキシが TLS を傍受する環境では、npm の取得が `SELF_SIGNED_CERT_IN_CHAIN` で失敗します。そのときはプロキシの CA 証明書を PEM で用意し、環境変数 `EXTRA_CA_CERTS_PEM` に中身を入れてビルドします。macOS でシステムのキーチェーンに CA が入っている場合は次のとおりです。
 
@@ -242,16 +245,17 @@ curl -H 'Authorization: Bearer dev-admin' http://127.0.0.1:8787/admin/api/overvi
 # {"services":1,"eventTypes":2,"webhooks":{"live":1,"failing":0,"expired":0},"pushStreams":1,"events":5}
 ```
 
-`docker compose up -d` では、ハブから届くイベントを表示するだけの購読者も 3 つ起動します。pi も LLM も使わず、pi の拡張と同じ受信の処理(`scripts/watch.ts`)で購読します。
+`docker compose up -d` では、ハブから届くイベントを表示するだけの購読者も 4 つ起動します。pi も LLM も使わず、pi の拡張と同じ受信の処理(`scripts/watch.ts`)で購読します。
 
-| コンテナ | 配信方式 | 購読条件 |
-|---|---|---|
-| `watch-push` | push | `{"customer":"alice"}` |
-| `watch-poll` | poll | `{"customer":"bob"}` |
-| `watch-webhook` | webhook(ハブが `http://watch-webhook:9100` へ POST) | 条件なし |
+| コンテナ | 購読するイベント | 配信方式 | 購読条件 |
+|---|---|---|---|
+| `watch-push` | `shop.order.created` | push | `{"customer":"alice"}` |
+| `watch-poll` | `shop.order.created` | poll | `{"customer":"bob"}` |
+| `watch-webhook` | `shop.order.created` | webhook(ハブが `http://watch-webhook:9100` へ POST) | 条件なし |
+| `watch-errors` | `api.error.occurred` | push | `{"severity":"critical"}` |
 
 ```sh
-docker compose logs -f watch-push watch-poll watch-webhook
+docker compose logs -f watch-push watch-poll watch-webhook watch-errors
 ```
 
 届いたイベントが 1 件ずつ出ます。購読条件に合わないイベントは出ません。
@@ -304,6 +308,61 @@ summary: 3/3 passed with anthropic/claude-haiku-5-5
 SMOKE_CALLBACK_HOST=host.docker.internal node scripts/smoke.ts http://127.0.0.1:8787
 ```
 
+### 例: サーバーのエラーをエージェントが受け取る
+
+サーバーがエラーを返すとエラーイベントがハブに届き、エラーを購読しているエージェントがそれを受け取って対応します。compose の `api` と `watch-errors` がこの関係を LLM なしで再現し、pi をつなげば pi が対応します。
+
+`api`(`mock/api-server.ts`)は小さな HTTP API で、`GET /health` と `GET /orders/:id` に答えます。5xx を返すたびに、応答を返したあとで `api.error.occurred` をハブに送ります。`/orders/:id` に `?fail=critical` を付けると 500(`database connection timed out`)、`?fail=warning` を付けると 503(`payment provider responded slowly`)で失敗します。compose の `api` は 2 秒ごとに自分の `/orders/:id` を呼び、その 2 割が critical か warning で失敗するので、何もしなくてもエラーが起きます。この 2 割の失敗は手で送ったリクエストにもかかるので、`?fail` を付けない curl が 500 や 503 になることもあります。
+
+`api.error.occurred` の payload は次のフィールドを持ちます。購読条件には `severity` と `route` を使えます。
+
+| フィールド | 内容 |
+|---|---|
+| `error_id` | エラーごとの ID。イベントの `eventId` にも使う |
+| `request_id` | リクエストの ID。応答の `x-request-id` ヘッダーと本文にも入る |
+| `method` / `route` / `status` | HTTP メソッド、ルートの型(`/orders/42` ではなく `/orders/:id`)、返したステータス |
+| `severity` | `critical`(500)か `warning`(503) |
+| `message` | 失敗の説明 |
+
+`watch-errors` は `api.error.occurred` を `{"severity":"critical"}` で push 購読し、届いたイベントを 1 行ずつ出します。
+
+```sh
+docker compose logs -f watch-errors
+```
+
+別の端末で critical のエラーを起こします。
+
+```sh
+curl -i 'http://127.0.0.1:8788/orders/42?fail=critical'
+# HTTP/1.1 500 Internal Server Error
+# x-request-id: req_ba9f42ff
+# {"request_id":"req_ba9f42ff","error":"database connection timed out"}
+```
+
+`watch-errors` に同じ `request_id` のイベントが出ます。
+
+```
+watch-errors-1  | #1 [push] 2026-10-19T07:02:33.936Z api.error.occurred err_101816b1 {"error_id":"err_101816b1","request_id":"req_ba9f42ff","method":"GET","route":"/orders/:id","severity":"critical","status":500,"message":"database connection timed out"}
+```
+
+`?fail=warning` の 503 も `api.error.occurred` としてハブに届きますが、購読条件に合わないので `watch-errors` には出ません。API のすべての応答と送ったイベントは `docker compose logs -f api` で見えます。
+
+pi に対応させるときは、client を起動します。
+
+```sh
+docker compose run --rm --use-aliases client
+```
+
+pi に「api.error.occurred を severity が critical のものだけ購読して。届いたら、何が失敗したか、考えられる原因、次に確認すべきことを短いトリアージで答えて。」と頼みます。pi は `events_subscribe` を `{"severity":"critical"}` で呼びます。上の curl で critical のエラーを起こすと、pi の新しいターンが始まり、次のように答えます(`anthropic/claude-haiku-5-5` で試したときの応答を縮めたもの)。
+
+```
+1) 失敗の内容: GET /orders/:id が HTTP 500 で失敗。message: database connection timed out(request_id: req_8d1e93e2)
+2) 考えられる原因: DB の過負荷や接続プール枯渇による接続待ちのタイムアウト、DB 自体の障害やネットワーク遅延
+3) 次に確認すべきこと: エラー発生時刻前後の DB のメトリクス(接続数、レイテンシ、スロークエリ)、同じ route でエラーが続いているか、直近のデプロイや接続設定の変更
+```
+
+compose の `api` は自分でも 20 秒に 1 回ほど critical のエラーを起こすので、curl を使わなくても同じように pi のターンが始まります。
+
 ### トークンを変える
 
 compose のトークンは既定で `dev-admin`(管理用)と `dev-client`(pi 用)です。変えるときは `.env` に書くか、シェルの環境変数で渡します。
@@ -313,7 +372,7 @@ HUB_ADMIN_TOKEN=my-admin
 HUB_CLIENT_TOKEN=my-client
 ```
 
-`HUB_ADMIN_TOKEN` は hub、service、check に、`HUB_CLIENT_TOKEN` は hub(`HUB_CLIENT_TOKENS=pi:<値>`)、client、check に同じ値で渡ります。変えたら `docker compose up -d` で hub と service を作り直します。トークンは HTTP ヘッダーに入るので、ASCII の記号と英数字だけで書きます。
+`HUB_ADMIN_TOKEN` は hub、service、api、check に、`HUB_CLIENT_TOKEN` は hub(`HUB_CLIENT_TOKENS=pi:<値>`)、client、check に同じ値で渡ります。変えたら `docker compose up -d` で hub、service、api を作り直します。トークンは HTTP ヘッダーに入るので、ASCII の記号と英数字だけで書きます。
 
 compose の hub は `HUB_ALLOW_PRIVATE_CALLBACKS=1` で起動します。コンテナのネットワークのアドレスはプライベートアドレスなので、これがないとハブは client コンテナの webhook 受け口に届けません。この設定とトークンの既定値は、手元で compose を動かすためだけのものです。
 
@@ -331,6 +390,7 @@ HUB_ADMIN_TOKEN=dev-admin HUB_CLIENT_TOKENS=pi:dev-client HUB_ALLOW_PRIVATE_CALL
 npm run mock -- register                     # shop サービスを登録し .data/shop.secret に保存
 npm run mock -- emit order.created '{"order_id":"o-1","customer":"alice","amount":1200,"currency":"JPY"}'
 npm run mock -- loop 5                        # 5 秒ごとにランダムな注文を送る
+node mock/api-server.ts                       # api サービスを登録し 127.0.0.1:8788 で待ち受ける
 ```
 
 ハブは http://127.0.0.1:8787 で待ち受け、イベントログを `.data/hub.db` に保存します。
@@ -413,9 +473,18 @@ compose(`compose.yaml`)が読む環境変数です。`.env` かシェルの環�
 | 環境変数 | 既定値 | 内容 |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | なし | client と check の pi が使う API キー |
-| `HUB_ADMIN_TOKEN` | `dev-admin` | hub、service、check の管理用トークン |
+| `HUB_ADMIN_TOKEN` | `dev-admin` | hub、service、api、check の管理用トークン |
 | `HUB_CLIENT_TOKEN` | `dev-client` | client と check のトークン。hub には `HUB_CLIENT_TOKENS=pi:<値>` として渡る |
 | `EXTRA_CA_CERTS_PEM` | なし | client のビルドで npm が信頼する CA 証明書の PEM。TLS を傍受するプロキシがある環境だけで使う |
+
+モックの API(`mock/api-server.ts`)の環境変数です。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `HUB_URL` / `HUB_ADMIN_TOKEN` | `http://127.0.0.1:8787` / `dev-admin` | 登録とイベント送信の宛先のハブと、その管理用トークン |
+| `PORT` / `HOST` | `8788` / `127.0.0.1` | API の待ち受けアドレス。compose では `HOST=0.0.0.0` |
+| `API_FAILURE_RATE` | `0` | `/orders/:id` が `?fail` なしでも失敗する割合(0 から 1)。失敗は critical と warning が半々。compose では `0.2` |
+| `API_TRAFFIC_INTERVAL_SEC` | `0`(止める) | この秒数ごとに自分の `/orders/:id` を呼ぶ。compose では `2` |
 
 `scripts/pi-demo.ts` と `scripts/smoke.ts` の環境変数です。
 
@@ -455,7 +524,7 @@ compose(`compose.yaml`)が読む環境変数です。`.env` かシェルの環�
                      "required": ["order_id", "customer"] } }] }
 ```
 
-`inputSchema` の各プロパティは、同名の payload フィールドとの完全一致フィルタです。payload に存在しないフィルタは登録時に拒否します。クライアントには `<service id>.<event name>` という名前で公開します。
+`inputSchema` の各プロパティは、同名の payload フィールドとの完全一致フィルタです。payload に存在しないフィルタは登録時に拒否します。クライアントには `<service id>.<event name>` という名前で公開します。`mock/api-server.ts` の `api` は、`severity`(`enum` で `warning` か `critical`)と `route` をフィルタにした例です。
 
 `POST /services/:id/events` は [Standard Webhooks](https://www.standardwebhooks.com) 形式(`webhook-id`、`webhook-timestamp`、`webhook-signature`)で署名した `{ "name", "data", "eventId"?, "timestamp"? }` を受け取ります。`eventId` を省くと `webhook-id` を使います。同じ `eventId` の再送は 1 回だけ記録します。
 
@@ -472,7 +541,7 @@ compose(`compose.yaml`)が読む環境変数です。`.env` かシェルの環�
 
 ## 検証
 
-- `npm test` は 39 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗、管理画面の API と CSP を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することと、`MCP_EVENTS_CALLBACK_URL` の URL をハブに渡してそこに届くことを確認します。
+- `npm test` は 40 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗、管理画面の API と CSP を確認します。`test/api-server.test.ts` はハブと `mock/api-server.ts` を起動し、500 と 503 の応答がそれぞれ 1 件ずつ `api.error.occurred` としてハブに届き、200 の応答では何も届かないことを確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することと、`MCP_EVENTS_CALLBACK_URL` の URL をハブに渡してそこに届くことを確認します。
 - `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。webhook の確認には、`SMOKE_CALLBACK_HOST`(既定 `127.0.0.1`)への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。Docker のハブは「Docker で動かす」の手順どおりに `host.docker.internal` を渡します。
 - `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。Docker では `docker compose run --rm --use-aliases check` が同じことをします。
   - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。リポジトリ直下の `.env`(git 管理外)に `ANTHROPIC_API_KEY=sk-ant-...` と書き、`npm run demo` で実行します。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。`PI_CODING_AGENT_DIR` がすでに設定されていれば、そのディレクトリを使います。

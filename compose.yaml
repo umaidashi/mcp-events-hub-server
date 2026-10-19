@@ -59,8 +59,34 @@ services:
       hub:
         condition: service_healthy
 
+  # A small HTTP API that reports each 5xx it answers as api.error.occurred. Its own traffic loop
+  # calls /orders/:id every 2 s and 20% of those calls fail; ?fail=critical|warning fails on demand.
+  api:
+    build:
+      context: .
+      target: app
+    command: ["node", "mock/api-server.ts"]
+    environment:
+      HOST: 0.0.0.0
+      HUB_URL: http://hub:8787
+      HUB_ADMIN_TOKEN: ${HUB_ADMIN_TOKEN:-dev-admin}
+      API_FAILURE_RATE: "0.2"
+      API_TRAFFIC_INTERVAL_SEC: "2"
+    ports:
+      - 127.0.0.1:8788:8788
+    depends_on:
+      hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      # Probe every second while starting, then every 30 s so /health lines do not bury the log.
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 1s
+
   # Lightweight subscribers without pi or an LLM: each one prints the events the hub delivers to it.
-  # Watch them with: docker compose logs -f watch-push watch-poll watch-webhook
+  # Watch them with: docker compose logs -f watch-push watch-poll watch-webhook watch-errors
   watch-push:
     <<: *watcher
     command: ["node", "scripts/watch.ts", "shop.order.created", '{"customer":"alice"}']
@@ -84,6 +110,18 @@ services:
       MCP_EVENTS_CALLBACK_HOST: 0.0.0.0
       MCP_EVENTS_CALLBACK_PORT: "9100"
       MCP_EVENTS_CALLBACK_URL: http://watch-webhook:9100
+
+  watch-errors:
+    <<: *watcher
+    command: ["node", "scripts/watch.ts", "api.error.occurred", '{"severity":"critical"}']
+    depends_on:
+      hub:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      <<: *watcher-env
+      MCP_EVENTS_DELIVERY: push
 
   client:
     <<: *client
