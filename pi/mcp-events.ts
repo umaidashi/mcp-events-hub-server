@@ -1,15 +1,23 @@
 // MCP Events client for pi: browse an events hub, subscribe, and wake the agent on each event.
 // Standalone on purpose: it speaks the wire protocol directly so it works against any MCP Events server.
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const HUB_URL = process.env.MCP_EVENTS_HUB_URL ?? "http://127.0.0.1:8787/mcp";
 const HUB_TOKEN = process.env.MCP_EVENTS_HUB_TOKEN;
+const DELIVERY = process.env.MCP_EVENTS_DELIVERY;
+const CALLBACK_PORT = Number(process.env.MCP_EVENTS_CALLBACK_PORT ?? 0);
+const TTL_MS = Number(process.env.MCP_EVENTS_TTL_MS ?? 3_600_000);
 const VERSION = "2026-07-28";
 const IDLE_MS = 45_000;
 const POLL_FLOOR_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const SEEN_MAX = 1_000;
+const MAX_CALLBACK_BODY = 1024 * 1024;
+const SIGNATURE_TOLERANCE_SEC = 300;
 
 type Args = Record<string, unknown>;
 type Descriptor = {
@@ -20,11 +28,15 @@ type Descriptor = {
   payloadSchema?: { properties?: Record<string, { type?: string }> };
 };
 type Occurrence = { eventId: string; name: string; timestamp: string; data: unknown; cursor?: string | null };
+type Mode = "push" | "poll" | "webhook";
+// One callback URL per webhook subscription, so the path alone routes a delivery to its secret.
+type Hook = { path: string; url: string; secret: string };
 type Subscription = {
   name: string;
   arguments: Args;
   instructions?: string;
-  mode: "push" | "poll";
+  mode: Mode;
+  hook?: Hook;
   cursor: string | null;
   controller: AbortController;
   seen: Set<string>;
@@ -102,6 +114,30 @@ export async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator
   }
 }
 
+// Standard Webhooks (https://www.standardwebhooks.com) signature check for hub-to-pi deliveries.
+function verifySignature(secret: string, headers: IncomingMessage["headers"], body: string): boolean {
+  const id = headers["webhook-id"], ts = headers["webhook-timestamp"], signature = headers["webhook-signature"];
+  if (typeof id !== "string" || typeof ts !== "string" || typeof signature !== "string" || !/^\d+$/.test(ts)) return false;
+  if (Math.abs(Date.now() / 1000 - Number(ts)) > SIGNATURE_TOLERANCE_SEC) return false;
+  const key = Buffer.from(secret.slice("whsec_".length), "base64");
+  const expected = createHmac("sha256", key).update(`${id}.${ts}.${body}`).digest();
+  return signature.split(" ").some((part) => {
+    const [version, value] = part.split(",");
+    const got = Buffer.from(value ?? "", "base64");
+    return version === "v1" && got.length === expected.length && timingSafeEqual(got, expected);
+  });
+}
+
+async function readBody(req: IncomingMessage): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    if ((size += chunk.length) > MAX_CALLBACK_BODY) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 function describe(d: Descriptor): string {
   const fields = (props?: Record<string, { type?: string; description?: string }>) =>
     Object.entries(props ?? {}).map(([k, v]) => `${k}:${v.type ?? "any"}`).join(", ") || "none";
@@ -110,6 +146,9 @@ function describe(d: Descriptor): string {
 
 export default function (pi: ExtensionAPI) {
   const subs = new Map<string, Subscription>();
+  const hooks = new Map<string, Subscription>(); // callback path -> webhook subscription
+  let hookSeq = 0;
+  let receiver: Promise<{ server: Server; base: string }> | null = null;
 
   const deliver = (sub: Subscription, event: Occurrence) => {
     if (sub.seen.has(event.eventId)) return;
@@ -123,14 +162,27 @@ export default function (pi: ExtensionAPI) {
       `<event_payload>\n${JSON.stringify(event.data, null, 2)}\n</event_payload>`,
     ].join("\n\n");
     pi.sendMessage(
-      { customType: "mcp-event", content, display: true, details: { subscription: { name: sub.name, arguments: sub.arguments }, event } },
+      { customType: "mcp-event", content, display: true, details: { subscription: { name: sub.name, arguments: sub.arguments, mode: sub.mode }, event } },
       { triggerTurn: true, deliverAs: "followUp" },
     );
   };
 
-  const end = (key: string, sub: Subscription, reason: string) => {
+  // Stops delivery locally and, for webhooks, at the hub. The receiver closes with its last subscription.
+  async function release(key: string, sub: Subscription) {
     sub.controller.abort();
     if (subs.get(key) === sub) subs.delete(key);
+    const hook = sub.hook;
+    if (!hook || !hooks.delete(hook.path)) return;
+    if (hooks.size === 0 && receiver) {
+      const closing = receiver;
+      receiver = null;
+      void closing.then(({ server }) => (server.close(), server.closeAllConnections()), () => {});
+    }
+    await call("events/unsubscribe", { name: sub.name, arguments: sub.arguments, delivery: { mode: "webhook", url: hook.url } }).catch(() => {});
+  }
+
+  const end = (key: string, sub: Subscription, reason: string) => {
+    void release(key, sub);
     pi.sendMessage({
       customType: "mcp-event-ended",
       content: `MCP events subscription ${sub.name} ${JSON.stringify(sub.arguments)} ended: ${reason}`,
@@ -211,6 +263,76 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function onCallback(req: IncomingMessage, res: ServerResponse) {
+    const sub = hooks.get(new URL(req.url ?? "/", "http://callback").pathname);
+    // 410 tells the hub to stop retrying a subscription this session no longer has.
+    if (req.method !== "POST" || !sub) return void res.writeHead(410).end();
+    const body = await readBody(req);
+    if (body === null) return void res.writeHead(413).end();
+    if (!verifySignature(sub.hook!.secret, req.headers, body)) return void res.writeHead(401).end();
+    let msg: any;
+    try {
+      msg = JSON.parse(body);
+    } catch {
+      return void res.writeHead(400).end();
+    }
+    if (msg?.type === "verification") {
+      return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ challenge: msg.challenge }));
+    }
+    if (typeof msg?.eventId !== "string") return void res.writeHead(400).end();
+    res.writeHead(204).end();
+    if ("cursor" in msg) sub.cursor = msg.cursor;
+    deliver(sub, msg);
+  }
+
+  function startReceiver() {
+    receiver ??= new Promise((resolve, reject) => {
+      const server = createServer((req, res) => {
+        onCallback(req, res).catch(() => (res.headersSent ? res.end() : res.writeHead(500).end()));
+      });
+      server.once("error", reject).listen(CALLBACK_PORT, "127.0.0.1", () => {
+        resolve({ server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+      });
+    });
+    const started = receiver;
+    started.catch(() => receiver === started && (receiver = null));
+    return started;
+  }
+
+  // Subscribes, then re-subscribes with the latest cursor at 80% of each lease to keep it alive.
+  async function runWebhook(key: string, sub: Subscription, ready: (err?: unknown) => void) {
+    let backoff = 1_000;
+    let started = false;
+    while (!sub.controller.signal.aborted) {
+      let wait: number;
+      try {
+        if (!sub.hook) {
+          const path = `/callback/${++hookSeq}`;
+          sub.hook = { path, url: `${(await startReceiver()).base}${path}`, secret: `whsec_${randomBytes(32).toString("base64")}` };
+          hooks.set(path, sub);
+        }
+        const r = await call("events/subscribe", {
+          name: sub.name, arguments: sub.arguments, cursor: sub.cursor, ttlMs: TTL_MS,
+          delivery: { mode: "webhook", url: sub.hook.url, secret: sub.hook.secret },
+        }, sub.controller.signal);
+        if (!started) (started = true), ready();
+        sub.cursor ??= r.cursor;
+        backoff = 1_000;
+        wait = r.refreshBefore ? Math.max((Date.parse(r.refreshBefore) - Date.now()) * 0.8, POLL_FLOOR_MS) : Infinity;
+      } catch (err) {
+        if (sub.controller.signal.aborted) return;
+        if (!started) return ready(err);
+        if (err instanceof RpcError) return end(key, sub, err.message);
+        wait = backoff;
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+      }
+      if (wait === Infinity) return;
+      await sleep(wait, sub.controller.signal);
+    }
+  }
+
+  const runners = { push: runPush, poll: runPoll, webhook: runWebhook };
+
   const listSubs = () =>
     subs.size === 0
       ? "Active subscriptions: none"
@@ -253,22 +375,23 @@ export default function (pi: ExtensionAPI) {
         const { events } = (await call("events/list", {}, signal)) as { events: Descriptor[] };
         const descriptor = events.find((e) => e.name === params.name);
         if (!descriptor) throw new Error(`Unknown event ${params.name}. Call events_catalog for the available names.`);
-        const mode = descriptor.delivery.includes("push") ? "push" : descriptor.delivery.includes("poll") ? "poll" : null;
-        if (!mode) throw new Error(`${params.name} only offers ${descriptor.delivery.join("/")}; pi has no public URL for webhook delivery.`);
+        const mode = (DELIVERY ?? (descriptor.delivery.includes("push") ? "push" : "poll")) as Mode;
+        if (!descriptor.delivery.includes(mode) || !Object.hasOwn(runners, mode)) {
+          throw new Error(`${params.name} offers ${descriptor.delivery.join("/")}, not ${mode}. Set MCP_EVENTS_DELIVERY to push, poll or webhook.`);
+        }
         const sub: Subscription = { name: params.name, arguments: args, instructions: params.instructions, mode, cursor: null, controller: new AbortController(), seen: new Set() };
         subs.set(key, sub);
         const started = new Promise<void>((resolve, reject) => {
           const ready = (err?: unknown) => (err ? reject(err) : resolve());
-          void (mode === "push" ? runPush : runPoll)(key, sub, ready);
+          void runners[mode](key, sub, ready);
         });
         try {
           await started;
         } catch (err) {
-          sub.controller.abort();
-          if (subs.get(key) === sub) subs.delete(key);
+          await release(key, sub);
           throw err;
         }
-        return text(`Subscribed to ${params.name} ${JSON.stringify(args)} via ${mode}. Matching events will arrive as new messages.`, { mode });
+        return text(`Subscribed to ${params.name} ${JSON.stringify(args)} via ${mode}. Matching events will arrive as new messages.`, { mode, callback: sub.hook?.url });
       },
     }),
   );
@@ -286,15 +409,13 @@ export default function (pi: ExtensionAPI) {
         const key = keyOf(params.name, params.arguments ?? {});
         const sub = subs.get(key);
         if (!sub) throw new Error(`No subscription for ${key}.\n${listSubs()}`);
-        sub.controller.abort();
-        subs.delete(key);
+        await release(key, sub);
         return text(`Unsubscribed from ${key}.`);
       },
     }),
   );
 
   pi.on("session_shutdown", async () => {
-    for (const sub of subs.values()) sub.controller.abort();
-    subs.clear();
+    await Promise.all([...subs].map(([key, sub]) => release(key, sub)));
   });
 }
