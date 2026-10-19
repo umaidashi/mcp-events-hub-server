@@ -15,6 +15,17 @@ x-client: &client
     MCP_EVENTS_CALLBACK_HOST: 0.0.0.0
     MCP_EVENTS_CALLBACK_PORT: "9100"
 
+x-watcher: &watcher
+  build:
+    context: .
+    target: app
+  depends_on:
+    hub:
+      condition: service_healthy
+  environment: &watcher-env
+    MCP_EVENTS_HUB_URL: http://hub:8787/mcp
+    MCP_EVENTS_HUB_TOKEN: ${HUB_CLIENT_TOKEN:-dev-client}
+
 services:
   hub:
     build:
@@ -47,6 +58,32 @@ services:
     depends_on:
       hub:
         condition: service_healthy
+
+  # Lightweight subscribers without pi or an LLM: each one prints the events the hub delivers to it.
+  # Watch them with: docker compose logs -f watch-push watch-poll watch-webhook
+  watch-push:
+    <<: *watcher
+    command: ["node", "scripts/watch.ts", "shop.order.created", '{"customer":"alice"}']
+    environment:
+      <<: *watcher-env
+      MCP_EVENTS_DELIVERY: push
+
+  watch-poll:
+    <<: *watcher
+    command: ["node", "scripts/watch.ts", "shop.order.created", '{"customer":"bob"}']
+    environment:
+      <<: *watcher-env
+      MCP_EVENTS_DELIVERY: poll
+
+  watch-webhook:
+    <<: *watcher
+    command: ["node", "scripts/watch.ts", "shop.order.created", "{}"]
+    environment:
+      <<: *watcher-env
+      MCP_EVENTS_DELIVERY: webhook
+      MCP_EVENTS_CALLBACK_HOST: 0.0.0.0
+      MCP_EVENTS_CALLBACK_PORT: "9100"
+      MCP_EVENTS_CALLBACK_URL: http://watch-webhook:9100
 
   client:
     <<: *client

@@ -239,7 +239,36 @@ ingest の secret は service コンテナの中の `/app/.data/shop.secret` に
 
 ```sh
 curl -H 'Authorization: Bearer dev-admin' http://127.0.0.1:8787/admin/api/overview
-# {"services":1,"eventTypes":2,"webhooks":{"live":0,"failing":0,"expired":0},"pushStreams":0,"events":5}
+# {"services":1,"eventTypes":2,"webhooks":{"live":1,"failing":0,"expired":0},"pushStreams":1,"events":5}
+```
+
+`docker compose up -d` では、ハブから届くイベントを表示するだけの購読者も 3 つ起動します。pi も LLM も使わず、pi の拡張と同じ受信の処理(`scripts/watch.ts`)で購読します。
+
+| コンテナ | 配信方式 | 購読条件 |
+|---|---|---|
+| `watch-push` | push | `{"customer":"alice"}` |
+| `watch-poll` | poll | `{"customer":"bob"}` |
+| `watch-webhook` | webhook(ハブが `http://watch-webhook:9100` へ POST) | 条件なし |
+
+```sh
+docker compose logs -f watch-push watch-poll watch-webhook
+```
+
+届いたイベントが 1 件ずつ出ます。購読条件に合わないイベントは出ません。
+
+```
+watch-push-1     | #3 [push] 2026-10-19T06:23:42.821Z shop.order.created msg_94eb… {"order_id":"ord_c70382e6","customer":"alice","amount":94340,"currency":"JPY"}
+watch-poll-1     | #1 [poll] 2026-10-19T06:23:51.920Z shop.order.created msg_bcb0… {"order_id":"ord_b2975c42","customer":"bob","amount":72653,"currency":"JPY"}
+watch-webhook-1  | #5 [webhook] 2026-10-19T06:23:48.881Z shop.order.created msg_b552… {"order_id":"ord_edcaab2b","customer":"alice","amount":45226,"currency":"JPY"}
+```
+
+管理画面の「購読」タブには、`watch-push` の push 接続と、`watch-webhook` の webhook 購読が出ます。poll はハブに状態を残さないので出ません。
+
+ホストから同じように確かめるときは、`node scripts/watch.ts <イベント名> '<購読条件の JSON>'` を使います。ハブの場所とトークンは `MCP_EVENTS_HUB_URL` と `MCP_EVENTS_HUB_TOKEN` で、配信方式は `MCP_EVENTS_DELIVERY` で渡します。
+
+```sh
+MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp MCP_EVENTS_HUB_TOKEN=dev-client \
+  node scripts/watch.ts shop.order.created '{"customer":"alice"}'
 ```
 
 ### 4. pi をつなぐ
