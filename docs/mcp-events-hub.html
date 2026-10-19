@@ -709,13 +709,17 @@ npm run demo    <span class="k"># push / poll / webhook を実際の pi と Clau
   <h2 id="s-files">どこに何があるか</h2>
   <div class="files">
     <code>src/protocol.ts</code><span>通信仕様の型、エラーコード、Standard Webhooksの署名と検証</span>
-    <code>src/hub.ts</code><span>ハブ本体。サービスAPI、MCPエンドポイント、3つの配信、webhookの再送</span>
-    <code>src/store.ts</code><span>SQLiteの3テーブル</span>
+    <code>src/hub.ts</code><span>ハブ本体。標準のRequestとResponseで、サービスAPI、MCPエンドポイント、3つの配信、webhookの再送を扱う</span>
+    <code>src/node.ts</code><span>Nodeで動かす入口。node:httpとnode:sqliteにつなぐ</span>
+    <code>src/worker.ts</code><span>Cloudflareで動かす入口。Durable Object <code>EventsHub</code>のSQLiteにつなぐ</span>
+    <code>cloudflare.config.ts</code><span>cf CLIで使うWorkerとDurable Objectの構成</span>
+    <code>src/store.ts</code><span>SQLiteの3テーブル。NodeとDurable Objectで同じSQLを使う</span>
     <code>src/schema.ts</code><span>JSON Schemaの最小限の検証</span>
     <code>mock/service.ts</code><span>テスト用のshopサービス(register / emit / loop)</span>
     <code>pi/mcp-events.ts</code><span>piのMCP Eventsクライアント拡張</span>
     <code>test/</code><span>ハブのテストと、拡張をLLMなしで動かすテスト</span>
     <code>scripts/pi-demo.ts</code><span>実際のpiとLLMで3方式を通すデモ</span>
+    <code>scripts/smoke.ts</code><span>動いているハブに対して、登録から3方式の配信までをHTTPで確かめるスクリプト</span>
   </div>
 </section>
 
