@@ -2,17 +2,140 @@
 
 [MCP Events](https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/main/docs/design-sketch-proposal.md) を中継するハブです。上流サービスは自前の MCP Events サーバーを作らず、イベント定義の登録と署名付き webhook の送信だけを実装します。クライアントエージェントはハブ 1 か所に接続し、全サービスのイベントを 1 つのカタログから購読します。
 
-```
-upstream service ──PUT /services/:id (catalog)──▶ ┌────────────┐ ──webhook (events/subscribe)──▶ ChatGPT
-upstream service ──POST /services/:id/events───▶ │ events hub │ ◀─events/stream (push, SSE)──── pi, other agents
-                   (Standard Webhooks signed)     └────────────┘ ◀─events/poll──────────────────── any MCP client
-```
-
 ハブの中身は追記専用のイベントログです。poll、push、webhook の 3 つの配信方式は同じログを読み、cursor はログの連番です。webhook しか受けられない ChatGPT も、公開 URL を持たない pi のようなローカルエージェントも、同じイベントを受け取れます。
 
 ハブ本体は Web 標準の `Request` と `Response` を受け渡す 1 つの fetch ハンドラ(`src/hub.ts`)です。同じコードを Node.js(`src/node.ts`)と Cloudflare Workers の Durable Object(`src/worker.ts`)で動かします。Node.js で動かすときの依存パッケージはなく、Node.js 24 以上で `.ts` をそのまま実行します。Cloudflare 向けの開発とビルドには devDependencies の `cf`、`@cloudflare/vite-plugin`、`vite` を使います。
 
+このリポジトリには、ハブのほかに 2 つの役割の実装が入っています。`mock/service.ts` は上流サービスの見本で、shop サービスを登録して注文イベントを送ります。`pi/mcp-events.ts` は [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) の拡張で、ハブのイベントを購読し、届くたびに pi の新しいターンを始めます。
+
 設計と使い方を図にしたページは [`docs/mcp-events-hub.html`](docs/mcp-events-hub.html) です。ブラウザで直接開けます。
+
+## 必要なもの
+
+| もの | 使う場面 |
+|---|---|
+| Docker と Docker Compose | Docker で動かすとき。手元では Docker Desktop 29 と Compose 5.5 で確かめた |
+| Node.js 24 以上 | Node.js で動かすとき、テスト、`scripts/smoke.ts` |
+| pi(`@earendil-works/pi-coding-agent`) | 手元の pi に拡張を入れるとき。Docker の client には入っている |
+| Anthropic の API キー | pi に LLM を動かさせるとき(Docker の client と check、`npm run demo`) |
+| `cf` CLI | Cloudflare で動かすときだけ。`npm install` で入る |
+
+## Docker で動かす
+
+`compose.yaml` は hub、service、client の 3 つの役割を別々のコンテナで動かします。check は client と同じイメージで、自動の確認だけをします。
+
+| サービス | 中身 | 起動のしかた |
+|---|---|---|
+| `hub` | ハブ(`src/node.ts`)。コンテナ内の 0.0.0.0:8787 で待ち受け、ホストの 127.0.0.1:8787 に公開する。SQLite は名前付きボリューム `hub-data` に置く | `docker compose up` |
+| `service` | モックの shop サービス(`mock/service.ts`)。起動時に shop を登録し、3 秒ごとに alice か bob の注文を送る | `docker compose up` |
+| `client` | pi と拡張。拡張はこのリポジトリを `pi install /app` で pi のパッケージとして入れてある | `docker compose run` |
+| `check` | `client` と同じイメージで `scripts/pi-demo.ts` を実行し、3 つの配信方式を実際の LLM で確かめる | `docker compose run` |
+
+`client` と `check` は compose の profile に入っているので、`docker compose up` では起動しません。
+
+### 1. API キーを置く
+
+リポジトリ直下に `.env`(git 管理外)を作り、Anthropic の API キーを書きます。
+
+```sh
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+```
+
+compose はこのファイルを `compose.yaml` の `${...}` の置き換えにだけ使います。キーを渡すのは `client` と `check` のコンテナだけで、`hub` と `service` のコンテナには渡りません。キーはイメージにも入りません。
+
+### 2. イメージを作る
+
+```sh
+docker compose --profile client --profile check build
+```
+
+hub と service のイメージは `node:24-slim` にソースをコピーしただけで、npm install をしません。client のイメージは pi 1.3.0 を `npm install -g` で入れ、続けて `pi install /app` で拡張を入れます。pi の設定ディレクトリはイメージ内の `/home/node/.pi/agent`(`PI_CODING_AGENT_DIR`)で、ホストの `~/.pi` は読みません。どのコンテナも `node` ユーザーで動きます。
+
+社内プロキシが TLS を傍受する環境では、npm の取得が `SELF_SIGNED_CERT_IN_CHAIN` で失敗します。そのときはプロキシの CA 証明書を PEM で用意し、環境変数 `EXTRA_CA_CERTS_PEM` に中身を入れてビルドします。macOS でシステムのキーチェーンに CA が入っている場合は次のとおりです。
+
+```sh
+security find-certificate -a -p /Library/Keychains/System.keychain > ~/extra-ca.pem
+EXTRA_CA_CERTS_PEM="$(cat ~/extra-ca.pem)" docker compose --profile client --profile check build
+```
+
+compose はこの値をビルドシークレット `extra-ca` として渡し、`Dockerfile` は npm install の 1 ステップだけで `NODE_EXTRA_CA_CERTS` に使います。証明書はイメージのレイヤーに残りません。手元の環境では、コンテナから api.anthropic.com への接続は傍受されておらず、実行時に CA は要りませんでした。
+
+### 3. ハブとサービスを起動する
+
+```sh
+docker compose up -d
+docker compose ps                 # hub が healthy になってから service が起動する
+docker compose logs -f service    # 送った注文が 1 行ずつ出る
+```
+
+service のログは次のように出ます。
+
+```
+registered shop.order.created, shop.order.shipped; secret saved to .data/shop.secret
+emit order.created {"order_id":"ord_d73009e5","customer":"alice","amount":91630,"currency":"JPY"} -> HTTP 202 {"seq":32}
+```
+
+ingest の secret は service コンテナの中の `/app/.data/shop.secret` に保存します。ハブは再登録しても同じ secret を返すので、コンテナを作り直しても続けて送れます。
+
+ブラウザで http://127.0.0.1:8787/admin を開き、トークンに `dev-admin` を入れると管理画面が見えます。画面の内容は「管理画面」の節にあります。API で確かめるときは次のとおりです。
+
+```sh
+curl -H 'Authorization: Bearer dev-admin' http://127.0.0.1:8787/admin/api/overview
+# {"services":1,"eventTypes":2,"webhooks":{"live":0,"failing":0,"expired":0},"pushStreams":0,"events":5}
+```
+
+### 4. pi をつなぐ
+
+```sh
+docker compose run --rm --use-aliases client
+```
+
+拡張を読み込んだ pi の TUI が開きます。「shop.order.created を customer=alice で購読して、届いたら金額を報告して」と頼むと、service が alice の注文を送るたびに新しいターンが始まります。モデルを選ぶときは `docker compose run --rm --use-aliases client pi --model anthropic/claude-haiku-5-5` のように引数を付けます。何も付けないと pi が自動で選び、手元では `anthropic/claude-opus-4-8` になりました。
+
+`--use-aliases` は、`docker compose run` で作るコンテナにサービス名 `client` を DNS 名として付けるためのものです。webhook で受けるとき(`MCP_EVENTS_DELIVERY=webhook`)、拡張は受け口を 0.0.0.0:9100 で開き、ハブには `http://client:9100/callback/<n>` を渡します。ハブのコンテナはこの名前で client のコンテナに届けます。push と poll ではこのフラグがなくても動きます。
+
+配信方式を変えるときは `docker compose run --rm --use-aliases -e MCP_EVENTS_DELIVERY=webhook client` のように渡します。
+
+### 5. 自動で確かめる
+
+```sh
+docker compose run --rm --use-aliases check
+```
+
+`check` は client のイメージで `scripts/pi-demo.ts` を実行します。`PI_DEMO_INSTALLED=1` で、`--extension` を使わずにイメージに入れたパッケージから拡張を読み込みます。対象は hub コンテナ(`PI_DEMO_HUB_URL=http://hub:8787`)で、push、poll、webhook の順に pi を起動し、alice の注文だけに `ORDER o-alice-1 4200 JPY` と返すことを確かめます。webhook はハブのコンテナから check のコンテナの `http://check:9100` に届きます。3 つとも通れば終了コード 0、1 つでも落ちれば 1 です。
+
+```
+PASS push (4s): alice's order triggered a turn with the expected reply; bob's order never reached pi
+PASS poll (5s): alice's order triggered a turn with the expected reply; bob's order never reached pi
+PASS webhook (4s): alice's order triggered a turn with the expected reply; bob's order never reached pi
+summary: 3/3 passed with anthropic/claude-haiku-5-5
+```
+
+ホストからハブのコンテナを確かめるときは `scripts/smoke.ts` を使います。webhook の受け口はホストの 127.0.0.1 で開くので、Docker Desktop のコンテナからホストに届く名前 `host.docker.internal` を `SMOKE_CALLBACK_HOST` で渡します。
+
+```sh
+SMOKE_CALLBACK_HOST=host.docker.internal node scripts/smoke.ts http://127.0.0.1:8787
+```
+
+### トークンを変える
+
+compose のトークンは既定で `dev-admin`(管理用)と `dev-client`(pi 用)です。変えるときは `.env` に書くか、シェルの環境変数で渡します。
+
+```sh
+HUB_ADMIN_TOKEN=my-admin
+HUB_CLIENT_TOKEN=my-client
+```
+
+`HUB_ADMIN_TOKEN` は hub、service、check に、`HUB_CLIENT_TOKEN` は hub(`HUB_CLIENT_TOKENS=pi:<値>`)、client、check に同じ値で渡ります。変えたら `docker compose up -d` で hub と service を作り直します。トークンは HTTP ヘッダーに入るので、ASCII の記号と英数字だけで書きます。
+
+compose の hub は `HUB_ALLOW_PRIVATE_CALLBACKS=1` で起動します。コンテナのネットワークのアドレスはプライベートアドレスなので、これがないとハブは client コンテナの webhook 受け口に届けません。この設定とトークンの既定値は、手元で compose を動かすためだけのものです。
+
+### 止める、データを消す
+
+```sh
+docker compose down       # コンテナを止めて消す。イベントログはボリューム hub-data に残る
+docker compose down -v    # ボリュームも消して、次の起動を空のハブから始める
+```
 
 ## Node.js で動かす
 
@@ -23,14 +146,18 @@ npm run mock -- emit order.created '{"order_id":"o-1","customer":"alice","amount
 npm run mock -- loop 5                        # 5 秒ごとにランダムな注文を送る
 ```
 
-pi から使うには、拡張を pi のパッケージとしてインストールします。このリポジトリの `package.json` が pi パッケージの定義を兼ねていて、`pi/mcp-events.ts` を拡張として読み込みます。インストールしても、ハブ側の開発用の依存(`cf`、`vite` など)は入りません。
+ハブは http://127.0.0.1:8787 で待ち受け、イベントログを `.data/hub.db` に保存します。
+
+## pi に拡張を入れる
+
+拡張を pi のパッケージとしてインストールします。このリポジトリの `package.json` が pi パッケージの定義を兼ねていて、`pi/mcp-events.ts` を拡張として読み込みます。インストールしても、ハブ側の開発用の依存(`cf`、`vite` など)は入りません。
 
 ```sh
 pi install git:github.com/umaidashi/mcp-events-hub-server   # GitHub から
 pi install /path/to/mcp-events-hub-server                   # 手元のクローンから(コピーせずにそのまま読む)
 ```
 
-拡張はハブの場所とトークンを環境変数から読みます。シェルの設定ファイルに書いておくと、pi を起動するたびに指定せずに済みます。
+拡張はハブの場所とトークンを環境変数から読みます。シェルの設定ファイルに書いておくと、pi を起動するたびに指定せずに済みます。トークンはハブの `HUB_CLIENT_TOKENS` のうち 1 つの `token` の部分で、ASCII の記号と英数字だけで書きます。日本語や空白が入っていると、拡張のツールは `MCP_EVENTS_HUB_TOKEN` を直すよう求めるエラーを返します。
 
 ```sh
 export MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp
@@ -42,15 +169,9 @@ pi
 
 pi のモデルには `events_catalog`、`events_subscribe`、`events_unsubscribe` の 3 つのツールが見えます。「shop.order.created を customer=alice で購読して、届いたら金額を報告して」のように頼むと、イベントが届くたびに新しいターンが始まります。
 
-拡張は既定で push を使い、ハブが push を出していなければ poll を使います。`MCP_EVENTS_DELIVERY` で配信方式を固定できます。
+拡張は既定で push を使い、ハブが push を出していなければ poll を使います。`MCP_EVENTS_DELIVERY` で配信方式を固定できます。環境変数の一覧は「設定」の節にあります。
 
-| 環境変数 | 既定値 | 内容 |
-|---|---|---|
-| `MCP_EVENTS_DELIVERY` | push、なければ poll | `push`、`poll`、`webhook` のどれか。ハブが出していない方式を選ぶと購読ツールがエラーを返す |
-| `MCP_EVENTS_CALLBACK_PORT` | `0`(空きポート) | webhook の受け口を開く 127.0.0.1 のポート |
-| `MCP_EVENTS_TTL_MS` | `3600000` | webhook 購読に求める TTL。残り時間の 8 割が過ぎたら最新の cursor で `events/subscribe` を呼び直す |
-
-webhook を選ぶと、拡張は最初の購読で 127.0.0.1 に HTTP サーバーを開き、購読ごとに `/callback/<n>` と `whsec_` secret を作って `events/subscribe` に渡します。ChatGPT と同じ経路をローカルで通すためのもので、ハブは `HUB_ALLOW_PRIVATE_CALLBACKS=1` で起動します。受け口は Standard Webhooks の署名を 5 分の許容幅で検証し、challenge に応答し、イベントを eventId で重複排除します。購読を解除すると `events/unsubscribe` を呼び、最後の購読が終わったらサーバーを閉じます。
+webhook を選ぶと、拡張は最初の購読で HTTP サーバーを開き、購読ごとに `/callback/<n>` と `whsec_` secret を作って `events/subscribe` に渡します。ChatGPT と同じ経路をローカルで通すためのもので、ハブは `HUB_ALLOW_PRIVATE_CALLBACKS=1` で起動します。受け口は既定で 127.0.0.1 に開きます。ハブが別のホストやコンテナにあるときは、`MCP_EVENTS_CALLBACK_HOST` で待ち受けるアドレスを、`MCP_EVENTS_CALLBACK_URL` でハブから届く URL を指定します。受け口は Standard Webhooks の署名を 5 分の許容幅で検証し、challenge に応答し、イベントを eventId で重複排除します。購読を解除すると `events/unsubscribe` を呼び、最後の購読が終わったらサーバーを閉じます。
 
 ## Cloudflare で動かす
 
@@ -74,9 +195,56 @@ npm run cf:types                                          # .cloudflare/types/in
 
 デプロイには `cf auth login` か `CLOUDFLARE_API_TOKEN` が必要です。`.cloudflare/` はビルドと型の生成物なので git 管理外です。
 
+## 設定
+
+ハブ(`src/node.ts`、`src/worker.ts`)の環境変数です。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `PORT` / `HOST` | `8787` / `127.0.0.1` | Node.js の待ち受けアドレス。compose では `HOST=0.0.0.0` |
+| `HUB_DB` | `.data/hub.db` | Node.js の SQLite ファイル。`:memory:` も可。compose では `/data/hub.db` |
+| `HUB_ADMIN_TOKEN` | なし | サービス登録と管理画面の Bearer トークン。未設定なら登録も管理画面の API も使えない |
+| `HUB_CLIENT_TOKENS` | なし | `principal:token,...`。未設定なら全員 `anonymous` になり、webhook 購読は拒否される |
+| `HUB_ALLOW_PRIVATE_CALLBACKS` | なし | `1` で http とプライベートアドレスへの callback を許可する(開発用) |
+
+Cloudflare では `HUB_ADMIN_TOKEN` と `HUB_CLIENT_TOKENS` を秘密情報として、`HUB_ALLOW_PRIVATE_CALLBACKS` を `cloudflare.config.ts` の値として渡します。`PORT`、`HOST`、`HUB_DB` は使いません。
+
+pi の拡張(`pi/mcp-events.ts`)の環境変数です。どれも pi の起動時に読みます。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `MCP_EVENTS_HUB_URL` | `http://127.0.0.1:8787/mcp` | ハブの MCP エンドポイント |
+| `MCP_EVENTS_HUB_TOKEN` | なし | ハブの `HUB_CLIENT_TOKENS` のうち 1 つのトークン。ASCII だけで書く |
+| `MCP_EVENTS_DELIVERY` | push、なければ poll | `push`、`poll`、`webhook` のどれか。ハブが出していない方式を選ぶと購読ツールがエラーを返す |
+| `MCP_EVENTS_CALLBACK_HOST` | `127.0.0.1` | webhook の受け口を開くアドレス。compose では `0.0.0.0` |
+| `MCP_EVENTS_CALLBACK_PORT` | `0`(空きポート) | webhook の受け口を開くポート。compose では `9100` |
+| `MCP_EVENTS_CALLBACK_URL` | `http://<CALLBACK_HOST>:<ポート>` | ハブに渡す受け口の URL。この後ろに `/callback/<n>` を付ける。compose では `http://client:9100` |
+| `MCP_EVENTS_TTL_MS` | `3600000` | webhook 購読に求める TTL。残り時間の 8 割が過ぎたら最新の cursor で `events/subscribe` を呼び直す |
+
+compose(`compose.yaml`)が読む環境変数です。`.env` かシェルの環境変数で渡します。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | なし | client と check の pi が使う API キー |
+| `HUB_ADMIN_TOKEN` | `dev-admin` | hub、service、check の管理用トークン |
+| `HUB_CLIENT_TOKEN` | `dev-client` | client と check のトークン。hub には `HUB_CLIENT_TOKENS=pi:<値>` として渡る |
+| `EXTRA_CA_CERTS_PEM` | なし | client のビルドで npm が信頼する CA 証明書の PEM。TLS を傍受するプロキシがある環境だけで使う |
+
+`scripts/pi-demo.ts` と `scripts/smoke.ts` の環境変数です。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `HUB_ADMIN_TOKEN` / `HUB_CLIENT_TOKEN` | `dev-admin` / `dev-client` | 対象のハブのトークン |
+| `PI_DEMO_MODEL` | `anthropic/claude-haiku-5-5` | デモの pi のモデル。Anthropic 以外を指定すると `~/.pi/agent` のログイン情報を使う |
+| `PI_DEMO_DELIVERY` | `all` | `push`、`poll`、`webhook`、`all` のどれか |
+| `PI_DEMO_HUB_URL` | なし | 指定するとハブを起動せず、その URL のハブを使う |
+| `PI_DEMO_INSTALLED` | なし | `1` で `--extension` を使わず、設定ディレクトリにインストールした拡張を読み込む |
+| `PI_CODING_AGENT_DIR` | `.data/pi-agent` | Anthropic のモデルで使う pi の設定ディレクトリ。client のイメージでは `/home/node/.pi/agent` |
+| `SMOKE_CALLBACK_HOST` | `127.0.0.1` | smoke の webhook 受け口にハブから届くホスト名。ハブが Docker にあるときは `host.docker.internal` |
+
 ## 管理画面
 
-ハブを起動したら、ブラウザで `/admin`(Node.js なら http://127.0.0.1:8787/admin、`cf dev` なら http://127.0.0.1:5173/admin)を開きます。最初に `HUB_ADMIN_TOKEN` の値を入れると、そのタブを閉じるまでブラウザの sessionStorage に保存します。
+ハブを起動したら、ブラウザで `/admin`(Node.js と Docker なら http://127.0.0.1:8787/admin、`cf dev` なら http://127.0.0.1:5173/admin)を開きます。最初に `HUB_ADMIN_TOKEN` の値を入れると、そのタブを閉じるまでブラウザの sessionStorage に保存します。
 
 画面の上段には、サービス数、イベント種別の数、webhook 購読の数(有効、失敗中、期限切れの内訳)、開いている push ストリームの数、保存したイベントの数が並びます。その下の 3 つのタブで詳細を確認します。
 
@@ -85,18 +253,6 @@ npm run cf:types                                          # .cloudflare/types/in
 - 最近のイベント。イベントログを新しい順に 50 件表示します。
 
 画面が読む API は `GET /admin/api/overview`、`/admin/api/services`、`/admin/api/subscriptions`、`/admin/api/events?limit=50`(最大 200)で、どれも `Authorization: Bearer $HUB_ADMIN_TOKEN` が必要です。ingest secret と webhook の secret はどの API も返しません。
-
-## 設定
-
-| 環境変数 | 既定値 | 内容 |
-|---|---|---|
-| `PORT` / `HOST` | `8787` / `127.0.0.1` | Node.js の待ち受けアドレス |
-| `HUB_DB` | `.data/hub.db` | Node.js の SQLite ファイル。`:memory:` も可 |
-| `HUB_ADMIN_TOKEN` | なし | サービス登録と管理画面の Bearer トークン。未設定なら登録も管理画面の API も使えない |
-| `HUB_CLIENT_TOKENS` | なし | `principal:token,...`。未設定なら全員 `anonymous` になり、webhook 購読は拒否される |
-| `HUB_ALLOW_PRIVATE_CALLBACKS` | なし | `1` で http とプライベートアドレスへの callback を許可する(開発用) |
-
-Cloudflare では `HUB_ADMIN_TOKEN` と `HUB_CLIENT_TOKENS` を秘密情報として、`HUB_ALLOW_PRIVATE_CALLBACKS` を `cloudflare.config.ts` の値として渡します。`PORT`、`HOST`、`HUB_DB` は使いません。
 
 ## サービス側の API
 
@@ -129,11 +285,10 @@ Cloudflare では `HUB_ADMIN_TOKEN` と `HUB_CLIENT_TOKENS` を秘密情報と�
 
 ## 検証
 
-- `npm test` は 37 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗、管理画面の API と CSP を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
-- `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。
-  - `PI_DEMO_INSTALLED=1` を付けると、`--extension` を使わず、デモ用の設定ディレクトリ `.data/pi-agent` にインストールした拡張を読み込みます。先に `PI_CODING_AGENT_DIR=$PWD/.data/pi-agent pi install $PWD` でインストールしておきます。webhook の確認には、127.0.0.1 への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。
-- `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。
-  - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。リポジトリ直下の `.env`(git 管理外)に `ANTHROPIC_API_KEY=sk-ant-...` と書き、`npm run demo` で実行します。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。
+- `npm test` は 39 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗、管理画面の API と CSP を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することと、`MCP_EVENTS_CALLBACK_URL` の URL をハブに渡してそこに届くことを確認します。
+- `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。webhook の確認には、`SMOKE_CALLBACK_HOST`(既定 `127.0.0.1`)への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。Docker のハブは「Docker で動かす」の手順どおりに `host.docker.internal` を渡します。
+- `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。Docker では `docker compose run --rm --use-aliases check` が同じことをします。
+  - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。リポジトリ直下の `.env`(git 管理外)に `ANTHROPIC_API_KEY=sk-ant-...` と書き、`npm run demo` で実行します。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。`PI_CODING_AGENT_DIR` がすでに設定されていれば、そのディレクトリを使います。
   - `PI_DEMO_DELIVERY=push|poll|webhook|all` で方式を絞れます。`PI_DEMO_MODEL=openai-codex/gpt-5.6-luna` のように Anthropic 以外を指定すると、`~/.pi/agent` のログイン情報を使います。
-  - `PI_DEMO_HUB_URL=http://127.0.0.1:5173 npm run demo` のように URL を渡すと、ハブを起動せずにそのハブを使います。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。
+  - `PI_DEMO_HUB_URL=http://127.0.0.1:5173 npm run demo` のように URL を渡すと、ハブを起動せずにそのハブを使います。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。webhook の確認には、拡張の受け口に http で届くハブが必要です。
   - `PI_DEMO_INSTALLED=1` を付けると、`--extension` を使わず、デモ用の設定ディレクトリ `.data/pi-agent` にインストールした拡張を読み込みます。先に `PI_CODING_AGENT_DIR=$PWD/.data/pi-agent pi install $PWD` でインストールしておきます。

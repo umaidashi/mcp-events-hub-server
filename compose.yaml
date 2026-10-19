@@ -1,0 +1,77 @@
+# Local development only: dev tokens by default, and the hub accepts http callbacks to private
+# addresses so it can reach the client container's webhook receiver.
+x-client: &client
+  build:
+    context: .
+    target: client
+    secrets: [extra-ca]
+  depends_on:
+    hub:
+      condition: service_healthy
+  environment: &client-env
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    MCP_EVENTS_HUB_URL: http://hub:8787/mcp
+    MCP_EVENTS_HUB_TOKEN: ${HUB_CLIENT_TOKEN:-dev-client}
+    MCP_EVENTS_CALLBACK_HOST: 0.0.0.0
+    MCP_EVENTS_CALLBACK_PORT: "9100"
+
+services:
+  hub:
+    build:
+      context: .
+      target: app
+    environment:
+      HOST: 0.0.0.0
+      HUB_DB: /data/hub.db
+      HUB_ADMIN_TOKEN: ${HUB_ADMIN_TOKEN:-dev-admin}
+      HUB_CLIENT_TOKENS: pi:${HUB_CLIENT_TOKEN:-dev-client}
+      HUB_ALLOW_PRIVATE_CALLBACKS: "1"
+    ports:
+      - 127.0.0.1:8787:8787
+    volumes:
+      - hub-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/admin').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  service:
+    build:
+      context: .
+      target: app
+    command: ["sh", "-c", "node mock/service.ts register && exec node mock/service.ts loop 3"]
+    environment:
+      HUB_URL: http://hub:8787
+      HUB_ADMIN_TOKEN: ${HUB_ADMIN_TOKEN:-dev-admin}
+    depends_on:
+      hub:
+        condition: service_healthy
+
+  client:
+    <<: *client
+    profiles: [client]
+    stdin_open: true
+    tty: true
+    environment:
+      <<: *client-env
+      MCP_EVENTS_CALLBACK_URL: http://client:9100
+
+  check:
+    <<: *client
+    profiles: [check]
+    command: ["node", "scripts/pi-demo.ts"]
+    environment:
+      <<: *client-env
+      MCP_EVENTS_CALLBACK_URL: http://check:9100
+      PI_DEMO_INSTALLED: "1"
+      PI_DEMO_HUB_URL: http://hub:8787
+      HUB_ADMIN_TOKEN: ${HUB_ADMIN_TOKEN:-dev-admin}
+      HUB_CLIENT_TOKEN: ${HUB_CLIENT_TOKEN:-dev-client}
+
+volumes:
+  hub-data:
+
+secrets:
+  extra-ca:
+    environment: EXTRA_CA_CERTS_PEM

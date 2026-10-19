@@ -89,7 +89,8 @@ if (import.meta.main) {
         amount: randomInt(100, 100_000),
         currency: "JPY",
       };
-      console.log(await emit(hubUrl, secret(), "order.created", data), data);
+      const { status, body } = await emit(hubUrl, secret(), "order.created", data);
+      console.log(`emit order.created ${JSON.stringify(data)} -> HTTP ${status} ${JSON.stringify(body)}`);
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   } else {

@@ -1,6 +1,6 @@
 // End-to-end proof with a real LLM: pi subscribes through the hub and reacts to a filtered event,
 // once per delivery mode, each with a fresh pi process and a fresh in-process hub, or the hub at
-// PI_DEMO_HUB_URL (which must accept http callbacks to 127.0.0.1 for the webhook mode).
+// PI_DEMO_HUB_URL (which must accept http callbacks to the extension's webhook receiver).
 // Usage: ANTHROPIC_API_KEY=... node scripts/pi-demo.ts   (PI_DEMO_DELIVERY=push|poll|webhook|all, PI_DEMO_MODEL=<provider>/<model>,
 //        PI_DEMO_HUB_URL=http://127.0.0.1:5173 with HUB_ADMIN_TOKEN and HUB_CLIENT_TOKEN matching that hub)
 import { spawn } from "node:child_process";
@@ -33,15 +33,16 @@ type Mode = (typeof MODES)[number];
 const textOf = (content: unknown): string =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
 
-// An Anthropic model runs on ANTHROPIC_API_KEY from an empty repo-local agent dir, so the claude.ai
-// login stored in ~/.pi/agent/auth.json is never used. Any other model uses the user's agent dir.
+// An Anthropic model runs on ANTHROPIC_API_KEY from an empty repo-local agent dir, or the
+// PI_CODING_AGENT_DIR already set (the client image's), so the claude.ai login stored in
+// ~/.pi/agent/auth.json is never used. Any other model uses the user's agent dir.
 function agentEnv(): Record<string, string> {
   if (!MODEL.startsWith("anthropic/")) return {};
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error(`${MODEL} needs ANTHROPIC_API_KEY, or set PI_DEMO_MODEL to another provider`);
     process.exit(1);
   }
-  const dir = `${ROOT}.data/pi-agent`;
+  const dir = process.env.PI_CODING_AGENT_DIR ?? `${ROOT}.data/pi-agent`;
   mkdirSync(dir, { recursive: true });
   return { PI_CODING_AGENT_DIR: dir };
 }

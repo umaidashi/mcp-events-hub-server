@@ -208,6 +208,12 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule);
 <section id="start" aria-labelledby="h-start">
   <span class="eyebrow">動かす</span>
   <h2 id="h-start">ローカルで、ハブとモックのサービスとpiをつなぐ</h2>
+  <h3 style="margin:8px 0 0;font-size:16px">Dockerで動かす</h3>
+  <p>ハブ、注文を送り続けるモックのshopサービス、拡張を入れたpiの3つを、<code>compose.yaml</code>1つで起動します。piには<code>.env</code>の<code>ANTHROPIC_API_KEY</code>を渡します。管理画面はhttp://127.0.0.1:8787/adminで、トークンは<code>dev-admin</code>です。</p>
+<pre class="cmd">docker compose up -d                          <span class="k"># ハブとshopサービス</span>
+docker compose run --rm --use-aliases client  <span class="k"># 拡張を読み込んだpiのTUI</span>
+docker compose run --rm --use-aliases check   <span class="k"># push、poll、webhookを実際のLLMで確かめる</span></pre>
+  <h3 style="margin:8px 0 0;font-size:16px">Node.jsで動かす</h3>
   <p>依存パッケージなしで、Node.js 24以上で<code>.ts</code>をそのまま実行します。</p>
   <ol class="steps">
     <li><p>ハブを起動します。</p>
@@ -235,7 +241,7 @@ npm run cf:deploy -- --secrets-file &lt;秘密情報のファイル&gt;</pre>
   <span class="eyebrow">確かめたこと</span>
   <h2 id="h-ver">3方式とも、実際のpiとClaudeで条件に合う注文だけに反応した</h2>
   <div class="verified">
-    <div><b>31 / 31</b><span><code>npm test</code>。LLMを使わずに、受信、3方式、署名検証、再送、拡張の動きを確かめるテスト</span></div>
+    <div><b>39 / 39</b><span><code>npm test</code>。LLMを使わずに、受信、3方式、署名検証、再送、拡張の動きを確かめるテスト</span></div>
     <div><b>3 / 3</b><span><code>npm run demo</code>。push、poll、webhookの順に、piがaliceの注文にだけ返事をした</span></div>
     <div><b>0件</b><span>購読条件に合わないbobの注文がpiに届いた回数</span></div>
   </div>

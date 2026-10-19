@@ -16,6 +16,9 @@ const TOKEN_ERROR =
     : null;
 const DELIVERY = process.env.MCP_EVENTS_DELIVERY;
 const CALLBACK_PORT = Number(process.env.MCP_EVENTS_CALLBACK_PORT ?? 0);
+const CALLBACK_HOST = process.env.MCP_EVENTS_CALLBACK_HOST ?? "127.0.0.1";
+// The URL the hub posts to, when it differs from the bind address, as from another container.
+const CALLBACK_URL = process.env.MCP_EVENTS_CALLBACK_URL?.replace(/\/+$/, "");
 const TTL_MS = Number(process.env.MCP_EVENTS_TTL_MS ?? 3_600_000);
 const VERSION = "2026-07-28";
 const IDLE_MS = 45_000;
@@ -297,8 +300,8 @@ export default function (pi: ExtensionAPI) {
       const server = createServer((req, res) => {
         onCallback(req, res).catch(() => (res.headersSent ? res.end() : res.writeHead(500).end()));
       });
-      server.once("error", reject).listen(CALLBACK_PORT, "127.0.0.1", () => {
-        resolve({ server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
+      server.once("error", reject).listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+        resolve({ server, base: CALLBACK_URL ?? `http://${CALLBACK_HOST}:${(server.address() as AddressInfo).port}` });
       });
     });
     const started = receiver;

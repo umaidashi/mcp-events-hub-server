@@ -1,6 +1,7 @@
 // Checks a running hub over HTTP: node scripts/smoke.ts <baseUrl>
 // HUB_ADMIN_TOKEN (default dev-admin) and HUB_CLIENT_TOKEN (default dev-client) must match the hub's
-// config. The webhook check needs a hub that accepts http callbacks to 127.0.0.1.
+// config. The webhook check needs a hub that accepts http callbacks to SMOKE_CALLBACK_HOST (default
+// 127.0.0.1; host.docker.internal when the hub runs in Docker).
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -15,6 +16,7 @@ if (!base) {
 }
 const ADMIN = process.env.HUB_ADMIN_TOKEN ?? "dev-admin";
 const CLIENT = process.env.HUB_CLIENT_TOKEN ?? "dev-client";
+const CALLBACK_HOST = process.env.SMOKE_CALLBACK_HOST ?? "127.0.0.1";
 const CREATED = "shop.order.created";
 const run = randomUUID().slice(0, 8);
 const alice = `alice-${run}`, bob = `bob-${run}`;
@@ -119,7 +121,7 @@ const checks: [string, () => Promise<void>][] = [
       else res.writeHead(200).end();
     });
     await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
-    const url = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}/hook`;
+    const url = `http://${CALLBACK_HOST}:${(receiver.address() as AddressInfo).port}/hook`;
     const deliveries = () => hits.filter((h) => h.body.type !== "verification");
     try {
       const sub = await result("events/subscribe", { name: CREATED, arguments: { customer: alice }, delivery: { mode: "webhook", url, secret: hookSecret }, cursor: null });
