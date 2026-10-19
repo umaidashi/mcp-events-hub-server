@@ -47,6 +47,8 @@ function agentEnv(): Record<string, string> {
 }
 
 const AGENT_ENV = agentEnv();
+// PI_DEMO_INSTALLED=1 loads the extension from the packages installed in the agent dir instead of --extension.
+const INSTALLED = process.env.PI_DEMO_INSTALLED === "1";
 
 async function runMode(mode: Mode): Promise<void> {
   const records: Rec[] = [];
@@ -85,9 +87,9 @@ async function runMode(mode: Mode): Promise<void> {
 
     pi = spawn(
       "pi",
-      ["--mode", "rpc", "--no-session", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
+      ["--mode", "rpc", "--no-session", "--no-mcp", "--no-skills", "--no-prompt-templates",
         "--no-context-files", "--no-approve", "--no-builtin-tools", "--thinking", "off", "--model", MODEL,
-        "--extension", "pi/mcp-events.ts"],
+        ...(INSTALLED ? [] : ["--no-extensions", "--extension", "pi/mcp-events.ts"])],
       {
         cwd: ROOT,
         env: { ...process.env, ...AGENT_ENV, MCP_EVENTS_HUB_URL: `${hub.url}/mcp`, MCP_EVENTS_HUB_TOKEN: CLIENT_TOKEN, MCP_EVENTS_DELIVERY: mode },

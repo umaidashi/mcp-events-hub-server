@@ -1,6 +1,12 @@
 {
   "name": "mcp-events-hub-server",
   "private": true,
+  "description": "MCP Events hub server, plus a pi extension that receives MCP events",
+  "keywords": [
+    "pi-package",
+    "mcp",
+    "mcp-events"
+  ],
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -19,5 +25,22 @@
     "@cloudflare/vite-plugin": "2.0.0-beta.v.1",
     "cf": "1.0.0-beta.18",
     "vite": "8.3.4"
+  },
+  "pi": {
+    "extensions": [
+      "./pi/mcp-events.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   }
 }

@@ -23,11 +23,22 @@ npm run mock -- emit order.created '{"order_id":"o-1","customer":"alice","amount
 npm run mock -- loop 5                        # 5 秒ごとにランダムな注文を送る
 ```
 
-pi から使うには拡張を読み込みます。
+pi から使うには、拡張を pi のパッケージとしてインストールします。このリポジトリの `package.json` が pi パッケージの定義を兼ねていて、`pi/mcp-events.ts` を拡張として読み込みます。インストールしても、ハブ側の開発用の依存(`cf`、`vite` など)は入りません。
 
 ```sh
-MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp MCP_EVENTS_HUB_TOKEN=dev-client pi --extension pi/mcp-events.ts
+pi install git:github.com/umaidashi/mcp-events-hub-server   # GitHub から
+pi install /path/to/mcp-events-hub-server                   # 手元のクローンから(コピーせずにそのまま読む)
 ```
+
+拡張はハブの場所とトークンを環境変数から読みます。シェルの設定ファイルに書いておくと、pi を起動するたびに指定せずに済みます。
+
+```sh
+export MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp
+export MCP_EVENTS_HUB_TOKEN=dev-client
+pi
+```
+
+インストールせずに 1 回だけ試すときは `pi --extension pi/mcp-events.ts` で読み込めます。外すときは `pi remove git:github.com/umaidashi/mcp-events-hub-server` です。
 
 pi のモデルには `events_catalog`、`events_subscribe`、`events_unsubscribe` の 3 つのツールが見えます。「shop.order.created を customer=alice で購読して、届いたら金額を報告して」のように頼むと、イベントが届くたびに新しいターンが始まります。
 
@@ -107,8 +118,10 @@ Cloudflare では `HUB_ADMIN_TOKEN` と `HUB_CLIENT_TOKENS` を秘密情報と�
 ## 検証
 
 - `npm test` は 31 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
-- `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。webhook の確認には、127.0.0.1 への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。
+- `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。
+  - `PI_DEMO_INSTALLED=1` を付けると、`--extension` を使わず、デモ用の設定ディレクトリ `.data/pi-agent` にインストールした拡張を読み込みます。先に `PI_CODING_AGENT_DIR=$PWD/.data/pi-agent pi install $PWD` でインストールしておきます。webhook の確認には、127.0.0.1 への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。
 - `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。
   - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。リポジトリ直下の `.env`(git 管理外)に `ANTHROPIC_API_KEY=sk-ant-...` と書き、`npm run demo` で実行します。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。
   - `PI_DEMO_DELIVERY=push|poll|webhook|all` で方式を絞れます。`PI_DEMO_MODEL=openai-codex/gpt-5.6-luna` のように Anthropic 以外を指定すると、`~/.pi/agent` のログイン情報を使います。
   - `PI_DEMO_HUB_URL=http://127.0.0.1:5173 npm run demo` のように URL を渡すと、ハブを起動せずにそのハブを使います。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。
+  - `PI_DEMO_INSTALLED=1` を付けると、`--extension` を使わず、デモ用の設定ディレクトリ `.data/pi-agent` にインストールした拡張を読み込みます。先に `PI_CODING_AGENT_DIR=$PWD/.data/pi-agent pi install $PWD` でインストールしておきます。

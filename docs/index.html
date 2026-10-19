@@ -216,10 +216,11 @@ HUB_ALLOW_PRIVATE_CALLBACKS=1 npm start</pre></li>
     <li><p>モックのshopサービスを登録し、注文イベントを送ります。</p>
 <pre class="cmd">npm run mock -- register
 npm run mock -- loop 5      <span class="k"># 5秒ごとにランダムな注文</span></pre></li>
-    <li><p>piを拡張付きで起動し、「shop.order.createdをcustomer=aliceで購読して、届いたら金額を報告して」と頼んでください。</p>
+    <li><p>piに拡張をインストールします。このリポジトリがそのままpiのパッケージになっています。</p>
+<pre class="cmd">pi install git:github.com/umaidashi/mcp-events-hub-server</pre></li>
+    <li><p>ハブの場所とトークンを渡してpiを起動し、「shop.order.createdをcustomer=aliceで購読して、届いたら金額を報告して」と頼んでください。</p>
 <pre class="cmd">MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp \
-MCP_EVENTS_HUB_TOKEN=dev-client \
-pi --extension pi/mcp-events.ts</pre></li>
+MCP_EVENTS_HUB_TOKEN=dev-client pi</pre></li>
   </ol>
   <h3 style="margin:8px 0 0;font-size:16px">Cloudflare WorkersとDurable Objectで動かす</h3>
   <p>同じハブを、Workerと、SQLiteストレージを持つDurable Object 1つで動かせます。構成は<code>cloudflare.config.ts</code>にあり、Cloudflareの<code>cf</code> CLIで開発とデプロイをします。</p>
