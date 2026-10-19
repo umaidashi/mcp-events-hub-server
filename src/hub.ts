@@ -1,26 +1,27 @@
+// The hub as one fetch handler over web-standard Request/Response, so Node (src/node.ts) and a
+// Durable Object (src/worker.ts) serve the same code. Platform specifics come in as arguments.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { EventEmitter } from "node:events";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { BlockList, type AddressInfo } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   canonicalJson, ErrorCode, LEGACY_VERSIONS, MODERN_VERSION, secretKey, signedHeaders, verify,
   type EventDescriptor, type EventOccurrence, type ServiceEventDef, type ServiceRegistration,
 } from "./protocol.ts";
 import { isObject, validate } from "./schema.ts";
-import { openStore, type LoggedEvent, type Subscription } from "./store.ts";
+import type { LoggedEvent, Store, Subscription } from "./store.ts";
 
 export type HubConfig = {
-  port: number;
-  host: string;
-  db: string;
   adminToken: string;
   clientTokens: string; // "principal:token,principal2:token2"
   allowPrivateCallbacks: boolean;
   retryBaseMs: number;
   heartbeatMs: number;
 };
+
+// Throws when a callback URL points somewhere the hub must not POST to. Node resolves DNS; the
+// Worker can only inspect the literal host.
+export type CallbackGuard = (url: URL) => Promise<void>;
+
+export type Hub = ReturnType<typeof createHub>;
 
 const MAX_BODY = 256 * 1024;
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -59,15 +60,6 @@ const invalid = (message: string, data?: unknown) => new RpcError(ErrorCode.Inva
 export function matches(args: Record<string, unknown>, data: Record<string, unknown>): boolean {
   return Object.entries(args).every(([k, v]) => canonicalJson(data[k]) === canonicalJson(v));
 }
-
-const PRIVATE = new BlockList();
-for (const [net, bits] of [
-  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
-  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 3],
-] as const) PRIVATE.addSubnet(net, bits, "ipv4");
-for (const [net, bits] of [
-  ["::", 127], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
-] as const) PRIVATE.addSubnet(net, bits, "ipv6");
 
 function failureReason(err: any): FailureReason {
   if (err?.name === "TimeoutError") return "timeout";
@@ -126,6 +118,8 @@ function registrationErrors(body: unknown): string[] {
   return errors;
 }
 
+// TODO(auth): only localhost Origins pass. Server-to-server clients send no Origin and are unaffected,
+// but a browser-based client on any other origin is refused outright; there is no allow-list.
 function isLocalOrigin(origin: string): boolean {
   try {
     return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(origin).hostname);
@@ -134,25 +128,23 @@ function isLocalOrigin(origin: string): boolean {
   }
 }
 
-async function readBody(req: IncomingMessage): Promise<Buffer | null> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
+// null when the body exceeds MAX_BODY; reading stops there.
+async function readBody(request: Request): Promise<string | null> {
+  if (!request.body) return "";
+  const decoder = new TextDecoder();
+  let text = "", size = 0;
+  for await (const chunk of request.body) {
+    size += chunk.byteLength;
     if (size > MAX_BODY) return null;
-    chunks.push(chunk);
+    text += decoder.decode(chunk, { stream: true });
   }
-  return Buffer.concat(chunks);
+  return text + decoder.decode();
 }
 
-function json(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
-  res.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body));
-}
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) => Response.json(body, { status, headers });
 
 const rpcError = (id: unknown, code: number, message: string, data?: unknown) =>
   ({ jsonrpc: "2.0", id: id ?? null, error: { code, message, data } });
-
-const header = (req: IncomingMessage, name: string) => req.headers[name] as string | undefined;
 
 function parseClientTokens(spec: string): Map<string, string> {
   const tokens = new Map<string, string>();
@@ -164,11 +156,9 @@ function parseClientTokens(spec: string): Map<string, string> {
   return tokens;
 }
 
-function envConfig(env = process.env): HubConfig {
+// Both entries read the same names: process.env on Node, the Worker's env bindings on Cloudflare.
+export function envConfig(env: { HUB_ADMIN_TOKEN?: string; HUB_CLIENT_TOKENS?: string; HUB_ALLOW_PRIVATE_CALLBACKS?: string }): HubConfig {
   return {
-    port: Number(env.PORT ?? 8787),
-    host: env.HOST ?? "127.0.0.1",
-    db: env.HUB_DB ?? ".data/hub.db",
     adminToken: env.HUB_ADMIN_TOKEN ?? "",
     clientTokens: env.HUB_CLIENT_TOKENS ?? "",
     allowPrivateCallbacks: env.HUB_ALLOW_PRIVATE_CALLBACKS === "1",
@@ -177,26 +167,33 @@ function envConfig(env = process.env): HubConfig {
   };
 }
 
-export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ url: string; close(): Promise<void> }> {
-  const config = { ...envConfig(), ...overrides };
+export function createHub(store: Store, config: HubConfig, guardCallback: CallbackGuard) {
   const tokens = parseClientTokens(config.clientTokens);
-  const store = openStore(config.db);
-  const live = new EventEmitter().setMaxListeners(0);
+  const live = new Set<(ev: LoggedEvent) => void>();
   const closing = new AbortController();
+  // TODO(auth): a passed challenge is cached per (principal, url) for an hour, so re-subscribing with a
+  // different secret or event skips the challenge. The cache is process (Durable Object) memory only.
   const verified = new Map<string, number>(); // canonicalJson([principal, url]) -> expiry ms
 
-  function authenticate(authorization: string | undefined): string | null {
+  // TODO(auth): a static bearer-token map. There is no OAuth 2.1 or protected resource metadata, which the
+  // MCP authorization spec expects of remote servers and ChatGPT-style clients need. With no tokens
+  // configured everyone is "anonymous", and poll and push are open to anyone who can reach the hub.
+  function authenticate(authorization: string | null): string | null {
     if (tokens.size === 0) return "anonymous";
     const token = authorization?.match(/^Bearer (.+)$/i)?.[1];
     return (token && tokens.get(token)) || null;
   }
 
-  function isAdmin(authorization: string | undefined): boolean {
+  // TODO(auth): one shared HUB_ADMIN_TOKEN can register, and overwrite, any service id. There is no
+  // per-service owner credential.
+  function isAdmin(authorization: string | null): boolean {
     if (!config.adminToken) return false;
     const got = Buffer.from(authorization ?? ""), want = Buffer.from(`Bearer ${config.adminToken}`);
     return got.length === want.length && timingSafeEqual(got, want);
   }
 
+  // TODO(auth): any authenticated principal can list, poll, stream and subscribe to every service's
+  // events. There is no per-principal ACL on services or event names.
   function resolveSubscription(params: any): { def: ServiceEventDef; args: Record<string, unknown> } {
     if (!isObject(params) || typeof params.name !== "string") throw invalid("name is required");
     const def = store.catalog().get(params.name);
@@ -238,18 +235,13 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
     return value as string;
   }
 
-  // ponytail: the address is validated but not pinned, so DNS rebinding between lookup and connect is
-  // still possible. Upgrade: an undici dispatcher with a custom lookup that returns the validated address.
+  // redirect "manual" rather than "error": Workers reject "error", and a 3xx is not ok, so it fails the
+  // same way on both platforms.
   async function post(url: string, headers: Record<string, string>, body: string): Promise<Response> {
     const target = new URL(url);
-    if (!config.allowPrivateCallbacks) {
-      const addresses = await lookup(target.hostname.replace(/^\[|\]$/g, ""), { all: true });
-      if (addresses.some((a) => PRIVATE.check(a.address, a.family === 6 ? "ipv6" : "ipv4"))) {
-        throw Object.assign(new Error("callback resolves to a non-public address"), { code: "EBLOCKED" });
-      }
-    }
+    if (!config.allowPrivateCallbacks) await guardCallback(target);
     return fetch(target, {
-      method: "POST", headers, body, redirect: "error",
+      method: "POST", headers, body, redirect: "manual",
       signal: AbortSignal.any([closing.signal, AbortSignal.timeout(10_000)]),
     });
   }
@@ -264,7 +256,7 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
         await res.body?.cancel();
         return statusReason(res.status);
       }
-      const echoed = Buffer.from(String((await res.json().catch(() => null))?.challenge ?? ""));
+      const echoed = Buffer.from(String((await res.json().catch(() => null) as any)?.challenge ?? ""));
       const expected = Buffer.from(challenge);
       return echoed.length === expected.length && timingSafeEqual(echoed, expected) ? null : "challenge_failed";
     } catch (err) {
@@ -274,6 +266,8 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
 
   // ponytail: the body cursor is the event's own seq, not a true ack watermark, so a client persisting
   // it can skip an earlier event that is still retrying. Upgrade: per-subscription min unacked seq.
+  // ponytail: retries wait on in-memory timers. A Durable Object evicted mid-backoff drops the remaining
+  // attempts. Upgrade: a pending_deliveries table drained by a Durable Object alarm.
   function deliver(subId: string, ev: LoggedEvent) {
     const occurrence: EventOccurrence = { eventId: ev.eventId, name: ev.name, timestamp: ev.timestamp, data: ev.data, cursor: String(ev.seq) };
     const body = JSON.stringify(occurrence);
@@ -304,19 +298,24 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
   }
 
   function publish(ev: LoggedEvent) {
-    live.emit("event", ev);
+    for (const listener of live) listener(ev);
     for (const sub of store.liveSubscriptions(ev.name, new Date().toISOString())) {
       if (matches(sub.arguments, ev.data)) deliver(sub.id, ev);
     }
   }
 
-  function stream(id: unknown, params: any, res: ServerResponse) {
+  // Ends when request.signal aborts (the client left; Workers need enable_request_signal) or the body is
+  // cancelled.
+  function stream(id: unknown, params: any, signal: AbortSignal): Response {
     const { def, args } = resolveSubscription(params);
     const cursor = parseCursor(params.cursor);
     const maxAgeMs = optionalInt(params.maxAgeMs, "maxAgeMs");
     const _meta = { [SUBSCRIPTION_META]: id };
+    const encoder = new TextEncoder();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c), cancel: () => end() });
     const frame = (method: string, p: Record<string, unknown>) =>
-      res.write(`data: ${JSON.stringify({ jsonrpc: "2.0", method, params: { ...p, _meta } })}\n\n`);
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ jsonrpc: "2.0", method, params: { ...p, _meta } })}\n\n`));
 
     // Highest seq written. Replay below is synchronous, so live events (always seq > head) arrive after
     // it and the watermark only drops overlap.
@@ -329,9 +328,8 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
     const onEvent = (ev: LoggedEvent) => {
       if (ev.name === def.name && matches(args, ev.data)) send(ev);
     };
-    live.on("event", onEvent);
+    live.add(onEvent);
     const head = store.head();
-    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no" });
     if (cursor === null) {
       sent = head;
       frame("notifications/events/active", { cursor: String(head), truncated: false });
@@ -341,10 +339,22 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
       events.forEach(send);
     }
     const heartbeat = setInterval(() => frame("notifications/events/heartbeat", { cursor: String(store.head()) }), config.heartbeatMs);
-    res.on("close", () => {
-      live.off("event", onEvent);
+    const done = AbortSignal.any([signal, closing.signal]);
+    let open = true;
+    const end = () => {
+      if (!open) return;
+      open = false;
+      live.delete(onEvent);
       clearInterval(heartbeat);
-    });
+      done.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      end();
+      controller.close();
+    };
+    if (done.aborted) onAbort();
+    else done.addEventListener("abort", onAbort);
+    return new Response(body, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no" } });
   }
 
   const methods: Record<string, (params: any, principal: string) => unknown> = {
@@ -441,31 +451,31 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
     },
   };
 
-  async function handleMcp(req: IncomingMessage, res: ServerResponse) {
-    if (req.method !== "POST") return json(res, 405, { error: "use POST" }, { allow: "POST" });
-    const origin = header(req, "origin");
-    if (origin !== undefined && !isLocalOrigin(origin)) return json(res, 403, { error: "origin not allowed" });
-    const principal = authenticate(header(req, "authorization"));
-    if (!principal) return json(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
-    const raw = await readBody(req);
-    if (!raw) return json(res, 413, { error: "request too large" }, { connection: "close" });
+  async function handleMcp(request: Request): Promise<Response> {
+    if (request.method !== "POST") return json(405, { error: "use POST" }, { allow: "POST" });
+    const origin = request.headers.get("origin");
+    if (origin !== null && !isLocalOrigin(origin)) return json(403, { error: "origin not allowed" });
+    const principal = authenticate(request.headers.get("authorization"));
+    if (!principal) return json(401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+    const raw = await readBody(request);
+    if (raw === null) return json(413, { error: "request too large" }, { connection: "close" });
     let msg: any;
     try {
-      msg = JSON.parse(raw.toString("utf8"));
+      msg = JSON.parse(raw);
     } catch {
-      return json(res, 400, rpcError(null, ErrorCode.ParseError, "Parse error"));
+      return json(400, rpcError(null, ErrorCode.ParseError, "Parse error"));
     }
     if (!isObject(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
-      return json(res, 400, rpcError(isObject(msg) ? msg.id : null, ErrorCode.InvalidRequest, "Invalid Request"));
+      return json(400, rpcError(isObject(msg) ? msg.id : null, ErrorCode.InvalidRequest, "Invalid Request"));
     }
-    if (msg.id === undefined) return void res.writeHead(202).end();
+    if (msg.id === undefined) return new Response(null, { status: 202 });
 
     const { id, method, params } = msg;
     const requested = isObject(params) && isObject(params._meta) ? params._meta[VERSION_META] : undefined;
     const modern = requested !== undefined;
     try {
       if (modern) {
-        if (header(req, "mcp-protocol-version") !== requested) {
+        if (request.headers.get("mcp-protocol-version") !== requested) {
           throw new RpcError(ErrorCode.HeaderMismatch, "MCP-Protocol-Version header must equal _meta protocolVersion", undefined, 400);
         }
         if (requested !== MODERN_VERSION) {
@@ -473,69 +483,70 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
             { supported: [MODERN_VERSION, ...LEGACY_VERSIONS], requested }, 400);
         }
         // ponytail: Mcp-Method is checked only when sent; make it required once every client sends it.
-        const methodHeader = header(req, "mcp-method");
-        if (methodHeader !== undefined && methodHeader !== method) {
+        const methodHeader = request.headers.get("mcp-method");
+        if (methodHeader !== null && methodHeader !== method) {
           throw new RpcError(ErrorCode.HeaderMismatch, "Mcp-Method header must equal method", undefined, 400);
         }
       }
-      if (method === "events/stream") return stream(id, params, res);
+      if (method === "events/stream") return stream(id, params, request.signal);
       if (!Object.hasOwn(methods, method)) {
         throw new RpcError(ErrorCode.MethodNotFound, `Method not found: ${method}`, undefined, modern ? 404 : 200);
       }
       const result = (await methods[method](params, principal)) as Record<string, unknown>;
-      json(res, 200, { jsonrpc: "2.0", id, result: modern ? { resultType: "complete", ...result } : result });
+      return json(200, { jsonrpc: "2.0", id, result: modern ? { resultType: "complete", ...result } : result });
     } catch (err) {
       if (!(err instanceof RpcError)) throw err;
-      json(res, err.status, rpcError(id, err.code, err.message, err.data));
+      return json(err.status, rpcError(id, err.code, err.message, err.data));
     }
   }
 
-  async function registerService(req: IncomingMessage, res: ServerResponse, id: string) {
-    if (!isAdmin(header(req, "authorization"))) return json(res, 401, { error: "invalid admin token" });
-    if (!SERVICE_ID.test(id)) return json(res, 400, { error: `service id must match ${SERVICE_ID}` });
-    const raw = await readBody(req);
-    if (!raw) return json(res, 413, { error: "body exceeds 256 KiB" }, { connection: "close" });
+  async function registerService(request: Request, id: string): Promise<Response> {
+    if (!isAdmin(request.headers.get("authorization"))) return json(401, { error: "invalid admin token" });
+    if (!SERVICE_ID.test(id)) return json(400, { error: `service id must match ${SERVICE_ID}` });
+    const raw = await readBody(request);
+    if (raw === null) return json(413, { error: "body exceeds 256 KiB" }, { connection: "close" });
     let body: any;
     try {
-      body = JSON.parse(raw.toString("utf8"));
+      body = JSON.parse(raw);
     } catch {
-      return json(res, 400, { error: "body is not JSON" });
+      return json(400, { error: "body is not JSON" });
     }
     const errors = registrationErrors(body);
-    if (errors.length) return json(res, 400, { error: errors.join("; ") });
+    if (errors.length) return json(400, { error: errors.join("; ") });
     const registration: ServiceRegistration = {
       name: body.name,
       description: body.description,
       events: body.events.map(({ name, description, inputSchema, payloadSchema }: ServiceEventDef) => ({ name, description, inputSchema, payloadSchema })),
     };
+    // TODO(auth): the ingest secret is minted once and never rotated, and every registration call returns
+    // it in the response body, so anyone holding the admin token can read any service's secret.
     const secret = store.upsertService(id, registration);
-    json(res, 200, { id, secret, events: registration.events.map((e) => `${id}.${e.name}`) });
+    return json(200, { id, secret, events: registration.events.map((e) => `${id}.${e.name}`) });
   }
 
-  async function ingest(req: IncomingMessage, res: ServerResponse, id: string) {
+  async function ingest(request: Request, id: string): Promise<Response> {
     const service = store.service(id);
-    if (!service) return json(res, 404, { error: "unknown service" });
-    const raw = await readBody(req);
-    if (!raw) return json(res, 413, { error: "body exceeds 256 KiB" }, { connection: "close" });
-    const text = raw.toString("utf8");
-    const webhookId = header(req, "webhook-id");
-    const signed = { id: webhookId, timestamp: header(req, "webhook-timestamp"), signature: header(req, "webhook-signature") };
-    if (!verify(service.secret, signed, text)) return json(res, 401, { error: "invalid webhook signature" });
+    if (!service) return json(404, { error: "unknown service" });
+    const text = await readBody(request);
+    if (text === null) return json(413, { error: "body exceeds 256 KiB" }, { connection: "close" });
+    const webhookId = request.headers.get("webhook-id");
+    const signed = { id: webhookId, timestamp: request.headers.get("webhook-timestamp"), signature: request.headers.get("webhook-signature") };
+    if (!verify(service.secret, signed, text)) return json(401, { error: "invalid webhook signature" });
     let body: any;
     try {
       body = JSON.parse(text);
     } catch {
-      return json(res, 400, { error: "body is not JSON" });
+      return json(400, { error: "body is not JSON" });
     }
     if (!isObject(body) || typeof body.name !== "string" || !isObject(body.data)
       || (body.eventId !== undefined && typeof body.eventId !== "string")
       || (body.timestamp !== undefined && (typeof body.timestamp !== "string" || Number.isNaN(Date.parse(body.timestamp))))) {
-      return json(res, 400, { error: "body must be { name, data, eventId?, timestamp? }" });
+      return json(400, { error: "body must be { name, data, eventId?, timestamp? }" });
     }
     const def = service.events.find((e) => e.name === body.name);
-    if (!def) return json(res, 404, { error: `unknown event ${body.name}` });
+    if (!def) return json(404, { error: `unknown event ${body.name}` });
     const errors = validate(def.payloadSchema, body.data);
-    if (errors.length) return json(res, 400, { error: "data does not match payloadSchema", errors });
+    if (errors.length) return json(400, { error: "data does not match payloadSchema", errors });
     const event = {
       name: `${id}.${def.name}`,
       eventId: body.eventId ?? webhookId!,
@@ -543,43 +554,30 @@ export async function startHub(overrides: Partial<HubConfig> = {}): Promise<{ ur
       data: body.data,
     };
     const { seq, duplicate } = store.append(event);
-    if (duplicate) return json(res, 200, { seq, duplicate: true });
-    json(res, 202, { seq });
+    if (duplicate) return json(200, { seq, duplicate: true });
     publish({ seq, ...event });
+    return json(202, { seq });
   }
 
-  async function route(req: IncomingMessage, res: ServerResponse) {
-    const path = new URL(req.url ?? "/", "http://hub").pathname;
-    if (path === "/mcp") return handleMcp(req, res);
+  async function route(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/mcp") return handleMcp(request);
     const m = /^\/services\/([^/]+)(\/events)?$/.exec(path);
-    if (m && !m[2] && req.method === "PUT") return registerService(req, res, m[1]);
-    if (m && m[2] && req.method === "POST") return ingest(req, res, m[1]);
-    json(res, 404, { error: "not found" });
+    if (m && !m[2] && request.method === "PUT") return registerService(request, m[1]);
+    if (m && m[2] && request.method === "POST") return ingest(request, m[1]);
+    return json(404, { error: "not found" });
   }
-
-  const server = createServer((req, res) => {
-    route(req, res).catch((err) => {
-      console.error(err);
-      if (res.headersSent) res.end();
-      else json(res, 500, { error: "internal error" });
-    });
-  });
-  await new Promise<void>((resolve, reject) => server.once("error", reject).listen(config.port, config.host, resolve));
-  const { port } = server.address() as AddressInfo;
 
   return {
-    url: `http://${config.host}:${port}`,
-    async close() {
-      closing.abort();
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-      store.close();
+    async fetch(request: Request): Promise<Response> {
+      try {
+        return await route(request);
+      } catch (err) {
+        console.error(err);
+        return json(500, { error: "internal error" });
+      }
     },
+    // Ends open streams and pending webhook retries. The caller owns and closes the store.
+    close: () => closing.abort(),
   };
-}
-
-if (import.meta.main) {
-  const hub = await startHub();
-  console.log(`mcp-events-hub listening on ${hub.url} (MCP endpoint ${hub.url}/mcp)`);
-  if (!process.env.HUB_ADMIN_TOKEN) console.warn("HUB_ADMIN_TOKEN is unset: service registration is disabled");
 }

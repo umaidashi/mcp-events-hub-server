@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { after, before, test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { startHub } from "../src/hub.ts";
+import { startHub } from "../src/node.ts";
 import { signedHeaders } from "../src/protocol.ts";
 import { emit, registerShop } from "../mock/service.ts";
 

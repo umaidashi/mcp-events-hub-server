@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { emit, registerShop, shop } from "../mock/service.ts";
-import { startHub } from "../src/hub.ts";
+import { startHub } from "../src/node.ts";
 import { ErrorCode, LEGACY_VERSIONS, MODERN_VERSION, newSecret, verify } from "../src/protocol.ts";
 
 const ADMIN = "admin";

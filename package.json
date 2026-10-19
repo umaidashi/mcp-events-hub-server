@@ -6,9 +6,18 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node src/hub.ts",
+    "start": "node src/node.ts",
     "test": "node --test 'test/**/*.test.ts'",
     "mock": "node mock/service.ts",
-    "demo": "node --env-file-if-exists=.env scripts/pi-demo.ts"
+    "demo": "node --env-file-if-exists=.env scripts/pi-demo.ts",
+    "cf:dev": "cf dev",
+    "cf:build": "cf build",
+    "cf:deploy": "cf deploy",
+    "cf:types": "cf workers types"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.v.1",
+    "cf": "1.0.0-beta.18",
+    "vite": "8.3.4"
   }
 }
