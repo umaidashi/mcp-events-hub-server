@@ -12,6 +12,8 @@ upstream service ──POST /services/:id/events───▶ │ events hub │ 
 
 依存パッケージはありません。Node.js 24 以上で `.ts` をそのまま実行します。
 
+設計と使い方を図にしたページは [`docs/mcp-events-hub.html`](docs/mcp-events-hub.html) です。ブラウザで直接開けます。
+
 ## 動かす
 
 ```sh

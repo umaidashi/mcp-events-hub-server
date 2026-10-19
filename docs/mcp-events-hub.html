@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Events Hub 設計と使い方</title>
+<style>
+:root {
+  --paper: #f3f5f7;
+  --surface: #ffffff;
+  --sunk: #e8ecf0;
+  --ink: #15202b;
+  --muted: #566472;
+  --rule: #d3dae1;
+  --hub: #0f5257;
+  --hub-soft: #dcebea;
+  --svc: #5a6748;
+  --push: #2655b8;
+  --poll: #9a5c00;
+  --webhook: #a3336b;
+  --ok: #2f7d4f;
+  --ng: #b3392f;
+  --serif: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif JP", serif;
+  --sans: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans JP", system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e1419; --surface: #151d24; --sunk: #1b252e; --ink: #e4eaf0; --muted: #94a3b1; --rule: #2a3743;
+    --hub: #63b7b4; --hub-soft: #173032; --svc: #a6b58c; --push: #84a8f2; --poll: #e2a64c; --webhook: #e47fb1;
+    --ok: #6cc591; --ng: #ef857b; color-scheme: dark;
+  }
+}
+:root[data-theme="light"] {
+  --paper: #f3f5f7; --surface: #ffffff; --sunk: #e8ecf0; --ink: #15202b; --muted: #566472; --rule: #d3dae1;
+  --hub: #0f5257; --hub-soft: #dcebea; --svc: #5a6748; --push: #2655b8; --poll: #9a5c00; --webhook: #a3336b;
+  --ok: #2f7d4f; --ng: #b3392f; color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --paper: #0e1419; --surface: #151d24; --sunk: #1b252e; --ink: #e4eaf0; --muted: #94a3b1; --rule: #2a3743;
+  --hub: #63b7b4; --hub-soft: #173032; --svc: #a6b58c; --push: #84a8f2; --poll: #e2a64c; --webhook: #e47fb1;
+  --ok: #6cc591; --ng: #ef857b; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 var(--sans); }
+a { color: var(--hub); }
+code, pre, .mono { font-family: var(--mono); font-size: .86em; }
+:focus-visible { outline: 2px solid var(--hub); outline-offset: 2px; }
+
+.page { max-width: 1080px; margin: 0 auto; padding: 0 20px 96px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--rule); }
+.topbar .repo { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.theme-toggle { font: 13px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+
+header.hero { display: grid; gap: 20px; padding: 48px 0 24px; }
+.hero h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(30px, 5vw, 46px); line-height: 1.3; margin: 0; text-wrap: balance; }
+.hero p.lede { margin: 0; max-width: 62ch; font-size: 17px; color: var(--muted); }
+.hero p.lede strong { color: var(--ink); font-weight: 600; }
+
+section { display: grid; gap: 18px; padding: 56px 0 8px; border-top: 1px solid var(--rule); margin-top: 40px; }
+section > .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .06em; color: var(--hub); }
+section h2 { font-family: var(--serif); font-weight: 600; font-size: clamp(22px, 3.2vw, 30px); line-height: 1.4; margin: 0; text-wrap: balance; }
+section h3 { font-size: 16px; margin: 0; }
+section p { margin: 0; max-width: 66ch; }
+.muted { color: var(--muted); }
+
+figure { margin: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; display: grid; gap: 12px; }
+figcaption { font-size: 13px; color: var(--muted); }
+.scroll { overflow-x: auto; }
+svg { display: block; width: 100%; height: auto; font-family: var(--sans); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { font: 13px var(--sans); border: 1px solid var(--rule); background: var(--paper); color: var(--ink); border-radius: 999px; padding: 4px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.chip .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.label-small { font-size: 12px; color: var(--muted); }
+
+/* topology */
+.topo text { fill: var(--ink); }
+.topo .node rect { fill: var(--surface); stroke: var(--rule); stroke-width: 1.2; }
+.topo .svc rect { stroke: var(--svc); }
+.topo .svc .tag { fill: var(--svc); }
+.topo .hubbox { fill: var(--hub-soft); stroke: var(--hub); stroke-width: 1.6; }
+.topo .hubtitle { fill: var(--hub); font-family: var(--serif); font-weight: 600; }
+.topo .cell { fill: var(--surface); stroke: var(--hub); stroke-width: 1; }
+.topo .cell-ng { fill: var(--sunk); stroke: var(--rule); }
+.topo .celltext { font-family: var(--mono); font-size: 11px; }
+.topo .port { fill: var(--surface); stroke: var(--hub); }
+.topo .ingest { stroke: var(--svc); stroke-width: 1.6; fill: none; }
+.topo .edge { fill: none; stroke-width: 2.4; transition: opacity .2s; }
+.topo .edge.push { stroke: var(--push); }
+.topo .edge.poll { stroke: var(--poll); stroke-dasharray: 7 5; }
+.topo .edge.webhook { stroke: var(--webhook); }
+.topo .elabel { font-size: 12px; transition: opacity .2s; }
+.topo .elabel.push { fill: var(--push); }
+.topo .elabel.poll { fill: var(--poll); }
+.topo .elabel.webhook { fill: var(--webhook); }
+.topo .note { fill: var(--muted); font-size: 11px; }
+.topo[data-focus="push"] .edge:not(.push), .topo[data-focus="push"] .elabel:not(.push),
+.topo[data-focus="poll"] .edge:not(.poll), .topo[data-focus="poll"] .elabel:not(.poll),
+.topo[data-focus="webhook"] .edge:not(.webhook), .topo[data-focus="webhook"] .elabel:not(.webhook) { opacity: .12; }
+.arrow-push { fill: var(--push); } .arrow-poll { fill: var(--poll); } .arrow-webhook { fill: var(--webhook); } .arrow-svc { fill: var(--svc); } .arrow-ink { fill: var(--ink); }
+
+.focus-text { font-size: 14px; min-height: 3.6em; margin: 0; max-width: none; }
+
+/* before / after */
+.compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.compare figure h3 { font-size: 15px; }
+.compare .count { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.mini line { stroke: var(--muted); stroke-width: 1.2; }
+.mini .hot { stroke: var(--ng); }
+.mini circle.s { fill: var(--svc); } .mini circle.c { fill: var(--ink); } .mini rect.h { fill: var(--hub); }
+.mini text { fill: var(--muted); font-size: 11px; }
+
+/* log */
+.log-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.facts { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.facts li { display: grid; grid-template-columns: 7.5em 1fr; gap: 12px; font-size: 14px; }
+.facts li b { font-weight: 600; color: var(--hub); }
+.tape text { fill: var(--ink); }
+.tape .c { fill: var(--surface); stroke: var(--hub); stroke-width: 1.2; }
+.tape .c.bob { stroke: var(--rule); fill: var(--sunk); }
+.tape .seq { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+.tape .ev { font-family: var(--mono); font-size: 11px; }
+.tape .cur line { stroke-width: 2; }
+.tape .cur text { font-family: var(--mono); font-size: 11px; }
+.tape .cur.push line { stroke: var(--push); } .tape .cur.push text { fill: var(--push); }
+.tape .cur.poll line { stroke: var(--poll); } .tape .cur.poll text { fill: var(--poll); }
+.tape .cur.webhook line { stroke: var(--webhook); } .tape .cur.webhook text { fill: var(--webhook); }
+
+/* sequence */
+.seqctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.seqctl .group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btn { font: 13px var(--sans); border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--hub); color: var(--surface); border-color: var(--hub); }
+.seq text { fill: var(--ink); font-size: 12px; }
+.seq .lane-head rect { fill: var(--surface); stroke: var(--rule); }
+.seq .lane-head text { font-weight: 600; font-size: 12.5px; }
+.seq .life { stroke: var(--rule); stroke-dasharray: 3 4; }
+.seq .msg line, .seq .msg path { stroke: var(--ink); stroke-width: 1.6; fill: none; }
+.seq .msg.ret line { stroke-dasharray: 5 4; }
+.seq .msg.push line { stroke: var(--push); } .seq .msg.push text { fill: var(--push); }
+.seq .msg.webhook line { stroke: var(--webhook); } .seq .msg.webhook text { fill: var(--webhook); }
+.seq .msg.poll line { stroke: var(--poll); } .seq .msg.poll text { fill: var(--poll); }
+.seq .msg.svc line { stroke: var(--svc); } .seq .msg.svc text { fill: var(--svc); }
+.seq .note rect { fill: var(--hub-soft); stroke: var(--hub); }
+.seq .note text { fill: var(--ink); }
+.seq .note.ng rect { fill: var(--sunk); stroke: var(--ng); }
+.seq .note.ng text { fill: var(--ng); }
+.seq .step { transition: opacity .25s; }
+.seq .step.future { opacity: .14; }
+.seq .step.skipped { opacity: .14; }
+.seq .step.current .hl { stroke: var(--hub); stroke-width: 2; fill: none; }
+.seq .step .hl { fill: none; stroke: none; }
+.seq .stepno { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+.caption-box { background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; font-size: 14px; min-height: 5.4em; }
+.caption-box b { font-family: var(--mono); font-weight: 600; color: var(--hub); margin-right: 8px; }
+
+/* wire tabs */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.tab { font: 14px var(--sans); background: none; border: none; border-bottom: 3px solid transparent; padding: 8px 14px; color: var(--muted); cursor: pointer; }
+.tab[aria-selected="true"] { color: var(--ink); font-weight: 600; }
+.tab[data-mode="poll"][aria-selected="true"] { border-color: var(--poll); }
+.tab[data-mode="push"][aria-selected="true"] { border-color: var(--push); }
+.tab[data-mode="webhook"][aria-selected="true"] { border-color: var(--webhook); }
+.panel { display: grid; gap: 14px; }
+.panel[hidden] { display: none; }
+.wire { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+pre { margin: 0; background: var(--sunk); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.6; font-size: 12.5px; }
+pre .k { color: var(--muted); }
+.wire h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.steps-inline { margin: 0; padding-left: 1.4em; display: grid; gap: 4px; font-size: 14px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 13px; background: var(--paper); }
+td code { white-space: nowrap; }
+.modehead { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.modehead .sw { width: 10px; height: 10px; border-radius: 2px; }
+
+/* filter */
+.filter-demo { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.fcard { border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; background: var(--paper); display: grid; gap: 6px; font-size: 14px; }
+.fcard .verdict { font-weight: 600; }
+.fcard.ok .verdict { color: var(--ok); }
+.fcard.ng .verdict { color: var(--ng); }
+
+/* pi flow */
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0; counter-reset: f; }
+.flow > div { padding: 14px 16px; border: 1px solid var(--rule); background: var(--surface); margin: -1px 0 0 -1px; display: grid; gap: 6px; font-size: 14px; }
+.flow > div h3 { font-size: 14px; }
+.flow > div .mono { color: var(--hub); }
+
+.cmd { display: grid; gap: 10px; }
+.cmd ol { margin: 0; padding-left: 1.4em; display: grid; gap: 14px; }
+.cmd li p { margin-bottom: 6px; }
+
+.results { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.result { border: 1px solid var(--rule); border-radius: 8px; padding: 14px; background: var(--surface); display: grid; gap: 4px; }
+.result .num { font-family: var(--mono); font-size: 22px; font-variant-numeric: tabular-nums; color: var(--ok); }
+.result .what { font-size: 13px; color: var(--muted); }
+.gaps { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; font-size: 14px; max-width: 72ch; }
+
+.files { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 14px; }
+.files code { color: var(--hub); }
+section > *, figure > *, .cmd li, .wire > div, .facts li > span, .fcard, .flow > div { min-width: 0; }
+p code, li code, .fcard code, .files code { overflow-wrap: anywhere; }
+footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--muted); }
+
+@media (max-width: 640px) {
+  .facts li { grid-template-columns: 1fr; gap: 0; }
+  .files { grid-template-columns: 1fr; }
+  .files code { margin-top: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="topbar">
+  <span class="repo">mcp-events-hub-server / docs</span>
+  <button class="theme-toggle" id="theme" type="button" aria-label="配色を切り替える">配色: 自動</button>
+</div>
+
+<header class="hero">
+  <h1>MCP Events Hub<br>サービスとエージェントの間で、イベントを中継する</h1>
+  <p class="lede">上流サービスは <strong>イベント定義の登録と、署名付き webhook の送信だけ</strong>を実装します。クライアントエージェントは <strong>ハブ 1 か所</strong>に接続し、全サービスのイベントを 1 つのカタログから購読します。配信は MCP Events ドラフト仕様の poll、push、webhook の 3 方式すべてに対応し、特定のベンダーに依存しません。</p>
+</header>
+
+<!-- 1. topology -->
+<section aria-labelledby="s-topo">
+  <span class="eyebrow">全体像</span>
+  <h2 id="s-topo">サービスはハブに送るだけ、クライアントは好きな方式で受け取る</h2>
+  <figure>
+    <div class="chips" role="group" aria-label="配信方式で絞り込む">
+      <span class="label-small">配信方式</span>
+      <button class="chip" type="button" data-focus="all" aria-pressed="true">すべて</button>
+      <button class="chip" type="button" data-focus="webhook" aria-pressed="false"><span class="sw" style="background:var(--webhook)"></span>webhook</button>
+      <button class="chip" type="button" data-focus="push" aria-pressed="false"><span class="sw" style="background:var(--push)"></span>push</button>
+      <button class="chip" type="button" data-focus="poll" aria-pressed="false"><span class="sw" style="background:var(--poll)"></span>poll</button>
+    </div>
+    <div class="scroll">
+      <svg class="topo" id="topo" viewBox="0 0 960 440" role="img" aria-labelledby="topo-t topo-d" style="min-width:720px">
+        <title id="topo-t">MCP Events Hub の構成図</title>
+        <desc id="topo-d">左に上流サービス 3 つ、中央にハブ、右にクライアント 3 つ。サービスは署名付き webhook でハブに送る。ハブは ChatGPT へ webhook、pi へ push、その他の MCP クライアントへ poll で配信する。</desc>
+        <defs>
+          <marker id="a-svc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-svc"/></marker>
+          <marker id="a-push" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-push"/></marker>
+          <marker id="a-poll" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-poll"/></marker>
+          <marker id="a-webhook" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-webhook"/></marker>
+        </defs>
+
+        <text x="30" y="34" class="note">上流サービス</text>
+        <g class="node svc">
+          <rect x="30" y="56" width="190" height="70" rx="6"/>
+          <text x="46" y="84" font-weight="600">shop</text>
+          <text x="46" y="106" font-size="12" class="tag">order.created ほか</text>
+        </g>
+        <g class="node svc">
+          <rect x="30" y="170" width="190" height="70" rx="6"/>
+          <text x="46" y="198" font-weight="600">billing(例)</text>
+          <text x="46" y="220" font-size="12" class="tag">invoice.paid</text>
+        </g>
+        <g class="node svc">
+          <rect x="30" y="284" width="190" height="70" rx="6"/>
+          <text x="46" y="312" font-weight="600">ci(例)</text>
+          <text x="46" y="334" font-size="12" class="tag">build.failed</text>
+        </g>
+
+        <path class="ingest" d="M220,91 C270,91 270,200 330,200" marker-end="url(#a-svc)"/>
+        <path class="ingest" d="M220,205 L330,205" marker-end="url(#a-svc)"/>
+        <path class="ingest" d="M220,319 C270,319 270,210 330,210" marker-end="url(#a-svc)"/>
+        <text x="232" y="392" class="note">PUT /services/:id で定義を登録</text>
+        <text x="232" y="408" class="note">POST /services/:id/events で送信</text>
+        <text x="232" y="424" class="note">(Standard Webhooks 署名)</text>
+
+        <rect class="hubbox" x="334" y="48" width="292" height="316" rx="10"/>
+        <text x="352" y="80" class="hubtitle" font-size="17">events hub</text>
+        <text x="352" y="102" class="note">カタログ: shop.order.created …</text>
+        <text x="352" y="150" class="note">追記専用のイベントログ(cursor = seq)</text>
+        <g>
+          <rect class="cell" x="352" y="160" width="42" height="40" rx="3"/><text class="celltext" x="373" y="185" text-anchor="middle">1</text>
+          <rect class="cell" x="398" y="160" width="42" height="40" rx="3"/><text class="celltext" x="419" y="185" text-anchor="middle">2</text>
+          <rect class="cell" x="444" y="160" width="42" height="40" rx="3"/><text class="celltext" x="465" y="185" text-anchor="middle">3</text>
+          <rect class="cell" x="490" y="160" width="42" height="40" rx="3"/><text class="celltext" x="511" y="185" text-anchor="middle">4</text>
+          <rect class="cell" x="536" y="160" width="42" height="40" rx="3"/><text class="celltext" x="557" y="185" text-anchor="middle">5</text>
+          <rect class="cell cell-ng" x="582" y="160" width="26" height="40" rx="3"/><text class="celltext" x="595" y="185" text-anchor="middle">…</text>
+        </g>
+        <text x="352" y="232" class="note">matches(arguments, data)</text>
+        <text x="352" y="248" class="note">引数 = payload の同名フィールドとの完全一致</text>
+        <text x="352" y="300" class="note">POST /mcp</text>
+        <text x="352" y="316" class="note">2026-07-28 と 2025-11-25 以前の両方</text>
+        <text x="352" y="340" class="note">SQLite(services / events / subscriptions)</text>
+
+        <text x="760" y="34" class="note">クライアントエージェント</text>
+        <g class="node">
+          <rect x="760" y="56" width="170" height="70" rx="6"/>
+          <text x="776" y="84" font-weight="600">ChatGPT</text>
+          <text x="776" y="106" font-size="12" class="note">ハブが URL へ POST</text>
+        </g>
+        <g class="node">
+          <rect x="760" y="170" width="170" height="70" rx="6"/>
+          <text x="776" y="198" font-weight="600">pi(拡張)</text>
+          <text x="776" y="220" font-size="12" class="note">SSE を開いたまま待つ</text>
+        </g>
+        <g class="node">
+          <rect x="760" y="284" width="170" height="70" rx="6"/>
+          <text x="776" y="312" font-weight="600">他のクライアント</text>
+          <text x="776" y="334" font-size="12" class="note">定期的に取りに行く</text>
+        </g>
+
+        <path class="edge webhook" d="M626,150 C690,150 690,91 756,91" marker-end="url(#a-webhook)"/>
+        <text class="elabel webhook" x="650" y="76">webhook</text>
+
+        <path class="edge push" d="M626,205 L756,205" marker-end="url(#a-push)"/>
+        <text class="elabel push" x="652" y="196">push(SSE)</text>
+
+        <path class="edge poll" d="M626,260 C690,260 690,319 756,319" marker-end="url(#a-poll)"/>
+        <text class="elabel poll" x="650" y="300">poll</text>
+      </svg>
+    </div>
+    <p class="focus-text" id="focus-text" aria-live="polite">3 つの方式はどれも同じイベントログを読みます。上のボタンで方式を選ぶと、その経路だけが残ります。</p>
+  </figure>
+</section>
+
+<!-- 2. why -->
+<section aria-labelledby="s-why">
+  <span class="eyebrow">なぜハブか</span>
+  <h2 id="s-why">組み合わせの数だけあった実装を、サービス数とクライアント数の和に減らす</h2>
+  <div class="compare">
+    <figure>
+      <h3>ハブなし</h3>
+      <svg class="mini" viewBox="0 0 300 150" role="img" aria-label="3 サービスと 3 クライアントが 9 本の線で直接つながる">
+        <line class="hot" x1="40" y1="30" x2="260" y2="30"/><line class="hot" x1="40" y1="30" x2="260" y2="75"/><line class="hot" x1="40" y1="30" x2="260" y2="120"/>
+        <line class="hot" x1="40" y1="75" x2="260" y2="30"/><line class="hot" x1="40" y1="75" x2="260" y2="75"/><line class="hot" x1="40" y1="75" x2="260" y2="120"/>
+        <line class="hot" x1="40" y1="120" x2="260" y2="30"/><line class="hot" x1="40" y1="120" x2="260" y2="75"/><line class="hot" x1="40" y1="120" x2="260" y2="120"/>
+        <circle class="s" cx="40" cy="30" r="8"/><circle class="s" cx="40" cy="75" r="8"/><circle class="s" cx="40" cy="120" r="8"/>
+        <circle class="c" cx="260" cy="30" r="8"/><circle class="c" cx="260" cy="75" r="8"/><circle class="c" cx="260" cy="120" r="8"/>
+        <text x="10" y="148">サービス</text><text x="236" y="148">クライアント</text>
+      </svg>
+      <p class="count">3 × 3 = 9 本の接続</p>
+      <p>サービスごとに MCP Events サーバーを作ります。購読の保存、TTL、callback 検証、署名、再送、3 つの配信方式を、各サービスが実装し直すことになります。クライアントはサービスの数だけ接続先を持ちます。</p>
+    </figure>
+    <figure>
+      <h3>ハブあり</h3>
+      <svg class="mini" viewBox="0 0 300 150" role="img" aria-label="3 サービスと 3 クライアントがハブを介して 6 本の線でつながる">
+        <line x1="40" y1="30" x2="140" y2="75"/><line x1="40" y1="75" x2="140" y2="75"/><line x1="40" y1="120" x2="140" y2="75"/>
+        <line x1="160" y1="75" x2="260" y2="30"/><line x1="160" y1="75" x2="260" y2="75"/><line x1="160" y1="75" x2="260" y2="120"/>
+        <rect class="h" x="134" y="58" width="32" height="34" rx="4"/>
+        <circle class="s" cx="40" cy="30" r="8"/><circle class="s" cx="40" cy="75" r="8"/><circle class="s" cx="40" cy="120" r="8"/>
+        <circle class="c" cx="260" cy="30" r="8"/><circle class="c" cx="260" cy="75" r="8"/><circle class="c" cx="260" cy="120" r="8"/>
+        <text x="10" y="148">サービス</text><text x="136" y="112">hub</text><text x="236" y="148">クライアント</text>
+      </svg>
+      <p class="count">3 + 3 = 6 本の接続</p>
+      <p>MCP Events の仕様の重い部分は、ハブが 1 回だけ実装します。サービスに残るのは、定義の登録と署名付き POST の 2 つです。クライアントの接続先は 1 つで、カタログも 1 つです。</p>
+    </figure>
+  </div>
+</section>
+
+<!-- 3. log -->
+<section aria-labelledby="s-log">
+  <span class="eyebrow">中心のデータ構造</span>
+  <h2 id="s-log">ハブの中身は 1 本のイベントログ。3 つの配信方式はその読み方の違い</h2>
+  <p>受け取ったイベントは、到着順の連番 <code>seq</code> を付けて追記します。どの方式でも cursor はこの連番で、「どこまで受け取ったか」を表します。再接続や再購読のときに cursor を渡せば、ログから続きを読み直せます。</p>
+  <div class="log-grid">
+    <figure>
+      <div class="scroll">
+        <svg class="tape" viewBox="0 0 520 250" role="img" aria-labelledby="tape-t" style="min-width:440px">
+          <title id="tape-t">イベントログと 3 つの cursor。seq 1 から 5 まで並び、push と webhook は最新の 5、poll は前回の位置 3 にいる。</title>
+          <g>
+            <rect class="c" x="20" y="60" width="90" height="56" rx="4"/><text class="seq" x="30" y="78">seq 1</text><text class="ev" x="30" y="100">alice o-1</text>
+            <rect class="c bob" x="116" y="60" width="90" height="56" rx="4"/><text class="seq" x="126" y="78">seq 2</text><text class="ev" x="126" y="100">bob o-2</text>
+            <rect class="c" x="212" y="60" width="90" height="56" rx="4"/><text class="seq" x="222" y="78">seq 3</text><text class="ev" x="222" y="100">alice o-3</text>
+            <rect class="c bob" x="308" y="60" width="90" height="56" rx="4"/><text class="seq" x="318" y="78">seq 4</text><text class="ev" x="318" y="100">bob o-4</text>
+            <rect class="c" x="404" y="60" width="90" height="56" rx="4"/><text class="seq" x="414" y="78">seq 5</text><text class="ev" x="414" y="100">alice o-5</text>
+          </g>
+          <text x="20" y="40" class="seq">shop.order.created のログ(枠が薄いものは customer=alice に一致しない)</text>
+          <g class="cur push"><line x1="494" y1="124" x2="494" y2="150"/><text x="430" y="166">push cursor "5"</text></g>
+          <g class="cur webhook"><line x1="494" y1="124" x2="494" y2="182"/><text x="410" y="198">webhook cursor "5"</text></g>
+          <g class="cur poll"><line x1="302" y1="124" x2="302" y2="150"/><text x="232" y="166">poll cursor "3"</text></g>
+          <text x="20" y="232" class="seq">次の events/poll(cursor "3")は seq 4〜5 を見て、一致する o-5 だけを返す</text>
+        </svg>
+      </div>
+      <figcaption>push と webhook はイベントが追記された瞬間に届き、poll は次に問い合わせたときに cursor から先をまとめて受け取ります。</figcaption>
+    </figure>
+    <figure>
+      <h3>テーブルは 3 つ(SQLite)</h3>
+      <ul class="facts">
+        <li><b>services</b><span>サービス ID、名前、イベント定義、ingest 署名用の secret。公開名は <code>&lt;service&gt;.&lt;event&gt;</code></span></li>
+        <li><b>events</b><span>追記専用のログ。<code>seq</code> が cursor。<code>(name, eventId)</code> が一意なので、再送されても 1 回だけ記録する</span></li>
+        <li><b>subscriptions</b><span>webhook 購読だけを保存する。ID は (principal, URL, name, arguments) のハッシュで、同じ購読は同じ ID になる</span></li>
+      </ul>
+      <p class="muted" style="font-size:14px">poll はハブに状態を残しません。push は接続している間だけメモリに持ちます。3 つの方式は同じ照合関数 <code>matches()</code> を使います。</p>
+    </figure>
+  </div>
+</section>
+
+<!-- 4. sequence -->
+<section aria-labelledby="s-seq">
+  <span class="eyebrow">1 件のイベントの流れ</span>
+  <h2 id="s-seq">注文が 1 件入ってから、エージェントが返事をするまで</h2>
+  <figure>
+    <div class="seqctl">
+      <div class="group" role="group" aria-label="注文した顧客を選ぶ">
+        <span class="label-small">注文した顧客</span>
+        <button class="chip" type="button" data-cust="alice" aria-pressed="true">alice(購読条件に一致)</button>
+        <button class="chip" type="button" data-cust="bob" aria-pressed="false">bob(一致しない)</button>
+      </div>
+      <div class="group">
+        <button class="btn" type="button" id="seq-reset">最初から</button>
+        <button class="btn" type="button" id="seq-prev">前へ</button>
+        <button class="btn primary" type="button" id="seq-next">次へ</button>
+        <button class="btn" type="button" id="seq-play" aria-pressed="false">自動再生</button>
+      </div>
+    </div>
+    <div class="scroll">
+      <svg class="seq" id="seq" viewBox="0 0 960 560" role="img" aria-labelledby="seq-t" style="min-width:760px">
+        <title id="seq-t">シーケンス図。shop、hub、pi(push)、ChatGPT(webhook)、poll するクライアントの 5 本のライフライン。</title>
+        <defs>
+          <marker id="s-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-ink"/></marker>
+          <marker id="s-svc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-svc"/></marker>
+          <marker id="s-push" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-push"/></marker>
+          <marker id="s-poll" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-poll"/></marker>
+          <marker id="s-webhook" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrow-webhook"/></marker>
+        </defs>
+        <g class="lane-head">
+          <rect x="30" y="16" width="120" height="40" rx="5"/><text x="90" y="41" text-anchor="middle">shop</text>
+          <rect x="240" y="16" width="120" height="40" rx="5"/><text x="300" y="41" text-anchor="middle">hub</text>
+          <rect x="450" y="16" width="140" height="40" rx="5"/><text x="520" y="41" text-anchor="middle">pi(push)</text>
+          <rect x="630" y="16" width="140" height="40" rx="5"/><text x="700" y="41" text-anchor="middle">ChatGPT(webhook)</text>
+          <rect x="810" y="16" width="130" height="40" rx="5"/><text x="875" y="41" text-anchor="middle">poll する側</text>
+        </g>
+        <line class="life" x1="90" y1="56" x2="90" y2="545"/>
+        <line class="life" x1="300" y1="56" x2="300" y2="545"/>
+        <line class="life" x1="520" y1="56" x2="520" y2="545"/>
+        <line class="life" x1="700" y1="56" x2="700" y2="545"/>
+        <line class="life" x1="875" y1="56" x2="875" y2="545"/>
+
+        <g class="step" data-step="1">
+          <g class="msg svc"><line x1="90" y1="96" x2="296" y2="96" marker-end="url(#s-svc)"/></g>
+          <text x="100" y="86" class="t-alice">POST /services/shop/events(署名付き)</text>
+          <text x="20" y="100" class="stepno">1</text>
+          <rect class="hl" x="84" y="72" width="222" height="32" rx="4"/>
+        </g>
+        <g class="step" data-step="2">
+          <g class="note"><rect x="230" y="116" width="250" height="44" rx="4"/></g>
+          <text x="242" y="134">署名と payload を検証</text>
+          <text x="242" y="152" class="v-text" data-alice="ログに追記 seq=6(alice o-6)" data-bob="ログに追記 seq=6(bob o-6)">ログに追記 seq=6(alice o-6)</text>
+          <text x="20" y="142" class="stepno">2</text>
+          <rect class="hl" x="226" y="112" width="258" height="52" rx="5"/>
+        </g>
+        <g class="step" data-step="3">
+          <g class="msg ret"><line x1="300" y1="186" x2="94" y2="186" marker-end="url(#s-ink)"/></g>
+          <text x="140" y="178">202 {"seq": 6}</text>
+          <text x="20" y="190" class="stepno">3</text>
+          <rect class="hl" x="88" y="164" width="218" height="30" rx="4"/>
+        </g>
+        <g class="step" data-step="4">
+          <g class="note v-note"><rect x="230" y="206" width="300" height="44" rx="4"/></g>
+          <text x="242" y="224">matches({customer: "alice"}, data)</text>
+          <text x="242" y="242" class="v-text" data-alice="一致 → 購読者へ配る" data-bob="不一致 → 記録だけして誰にも配らない">一致 → 購読者へ配る</text>
+          <text x="20" y="232" class="stepno">4</text>
+          <rect class="hl" x="226" y="202" width="308" height="52" rx="5"/>
+        </g>
+        <g class="step" data-step="5" data-deliver="1">
+          <g class="msg push"><line x1="300" y1="290" x2="516" y2="290" marker-end="url(#s-push)"/></g>
+          <text x="312" y="280">SSE: notifications/events/event</text>
+          <text x="20" y="294" class="stepno">5</text>
+          <rect class="hl" x="294" y="266" width="232" height="32" rx="4"/>
+        </g>
+        <g class="step" data-step="6" data-deliver="1">
+          <g class="msg webhook"><line x1="300" y1="340" x2="696" y2="340" marker-end="url(#s-webhook)"/></g>
+          <text x="536" y="330">POST callback(署名付き)</text>
+          <g class="msg ret webhook"><line x1="700" y1="362" x2="304" y2="362" marker-end="url(#s-webhook)"/></g>
+          <text x="536" y="378">2xx(失敗なら間隔を広げて再送)</text>
+          <text x="20" y="352" class="stepno">6</text>
+          <rect class="hl" x="294" y="316" width="412" height="68" rx="4"/>
+        </g>
+        <g class="step" data-step="7">
+          <g class="msg poll"><line x1="875" y1="418" x2="304" y2="418" marker-end="url(#s-poll)"/></g>
+          <text x="712" y="410">events/poll {cursor: "5"}</text>
+          <g class="msg ret poll"><line x1="300" y1="444" x2="871" y2="444" marker-end="url(#s-poll)"/></g>
+          <text x="712" y="462" class="v-text" data-alice="{events: [o-6], cursor: &quot;6&quot;}" data-bob="{events: [], cursor: &quot;6&quot;}">{events: [o-6], cursor: "6"}</text>
+          <text x="20" y="432" class="stepno">7</text>
+          <rect class="hl" x="294" y="394" width="588" height="76" rx="4"/>
+        </g>
+        <g class="step" data-step="8" data-deliver="1">
+          <g class="note"><rect x="400" y="490" width="300" height="44" rx="4"/></g>
+          <text x="412" y="508">拡張が会話に入れ、新しいターンを起こす</text>
+          <text x="412" y="526">ORDER o-6 4200 JPY</text>
+          <text x="20" y="516" class="stepno">8</text>
+          <rect class="hl" x="396" y="486" width="308" height="52" rx="5"/>
+        </g>
+      </svg>
+    </div>
+    <div class="caption-box" id="seq-caption" aria-live="polite"></div>
+  </figure>
+</section>
+
+<!-- 5. wire -->
+<section aria-labelledby="s-wire">
+  <span class="eyebrow">通信の形式</span>
+  <h2 id="s-wire">届く中身は 3 方式で同じ。違うのは、誰が接続を始めて、どう運ぶか</h2>
+  <p>イベント本体は共通で、<code>{ eventId, name, timestamp, data, cursor }</code> の形をしています。下の例は、ハブを実際に動かして取った通信です。</p>
+  <figure>
+    <div class="tabs" role="tablist" aria-label="配信方式">
+      <button class="tab" role="tab" type="button" id="t-poll" data-mode="poll" aria-selected="true" aria-controls="p-poll">poll</button>
+      <button class="tab" role="tab" type="button" id="t-push" data-mode="push" aria-selected="false" aria-controls="p-push" tabindex="-1">push</button>
+      <button class="tab" role="tab" type="button" id="t-webhook" data-mode="webhook" aria-selected="false" aria-controls="p-webhook" tabindex="-1">webhook</button>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-poll" aria-labelledby="t-poll">
+      <p>クライアントが <code>events/poll</code> を定期的に送る、普通のリクエストと応答です。ハブは購読の状態を持ちません。<code>nextPollMs</code> だけ待って次を送り、<code>hasMore: true</code> のときは待たずに続けます。</p>
+      <div class="wire">
+        <div><h3>1 回目(cursor: null で現在位置だけもらう)</h3>
+<pre><span class="k">→</span> {"method":"events/poll","params":{
+    "name":"shop.order.created",
+    "arguments":{"customer":"alice"},
+    "cursor":null}}
+<span class="k">←</span> {"result":{"events":[],"cursor":"0",
+    "hasMore":false,"nextPollMs":2000}}</pre></div>
+        <div><h3>2 回目(受け取った cursor を渡す)</h3>
+<pre><span class="k">→</span> {"method":"events/poll","params":{ … ,"cursor":"0"}}
+<span class="k">←</span> {"result":{"events":[{
+    "eventId":"evt-o-1",
+    "name":"shop.order.created",
+    "data":{"order_id":"o-1","customer":"alice",
+            "amount":4200,"currency":"JPY"}}],
+    "cursor":"1","hasMore":false}}</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-push" aria-labelledby="t-push" hidden>
+      <p>クライアントが <code>events/stream</code> を 1 回送ると、応答が <code>text/event-stream</code>(SSE)になり、接続が開いたままになります。1 行の <code>data:</code> が 1 つの通知です。接続を切ると購読も終わり、最後の cursor を付けて張り直せば続きから受け取れます。</p>
+      <div class="wire">
+        <div><h3>ストリームの中身</h3>
+<pre>data: {"method":"notifications/events/active",
+       "params":{"cursor":"1"}}        <span class="k">← 購読開始</span>
+
+data: {"method":"notifications/events/event",
+       "params":{"eventId":"evt-o-2", … ,
+                 "cursor":"2"}}         <span class="k">← イベント</span>
+
+data: {"method":"notifications/events/heartbeat",
+       "params":{"cursor":"2"}}         <span class="k">← 約 15 秒ごと</span></pre></div>
+        <div><h3>押さえておく点</h3>
+          <ul class="steps-inline">
+            <li>heartbeat は、イベントがない間も接続の生存と cursor の位置を伝えます。</li>
+            <li>pi の拡張は 45 秒何も届かなければ接続が死んだとみなし、cursor 付きで張り直します。</li>
+            <li>どの通知にも <code>_meta</code> の subscriptionId が付くので、複数のストリームを区別できます。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-webhook" aria-labelledby="t-webhook" hidden>
+      <p>クライアントが受け取り先の URL と <code>whsec_</code> で始まる secret を <code>events/subscribe</code> で登録します。以後はハブがその URL へ POST します。ChatGPT が使う方式で、受け取る側は外から届く URL を持つ必要があります。</p>
+      <div class="wire">
+        <div><h3>① 登録時の確認(challenge)</h3>
+<pre>POST /callback/1
+webhook-id: msg_verification_ba24…
+webhook-signature: v1,/med6h2z…
+x-mcp-subscription-id: sub_02cd31bd…
+
+{"type":"verification","challenge":"OaGG5GAf…"}
+<span class="k">← 同じ challenge を返すと登録完了</span></pre></div>
+        <div><h3>② subscribe の応答</h3>
+<pre>{"result":{"id":"sub_02cd31bd…",
+  "refreshBefore":"2026-10-19T03:52:48.518Z",
+  "cursor":"2","truncated":false}}
+<span class="k">← refreshBefore までに subscribe し直して延長</span></pre></div>
+        <div><h3>③ イベントの配信</h3>
+<pre>POST /callback/1
+webhook-id: evt-o-3
+webhook-timestamp: 1792381368
+webhook-signature: v1,RPZH/2CJ…
+x-mcp-subscription-id: sub_02cd31bd…
+
+{"eventId":"evt-o-3","name":"shop.order.created",
+ "data":{ … },"cursor":"3"}</pre></div>
+      </div>
+      <p class="muted" style="font-size:14px">署名は <code>webhook-id</code>、<code>webhook-timestamp</code>、本文をつないだ文字列の HMAC-SHA256 です(Standard Webhooks)。2xx 以外は間隔を広げて再送し(初回を含めて最大 5 回)、410 と 413 は再送しません。</p>
+    </div>
+  </figure>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th></th><th><span class="modehead"><span class="sw" style="background:var(--poll)"></span>poll</span></th><th><span class="modehead"><span class="sw" style="background:var(--push)"></span>push</span></th><th><span class="modehead"><span class="sw" style="background:var(--webhook)"></span>webhook</span></th></tr></thead>
+      <tbody>
+        <tr><th scope="row">接続を始める側</th><td>クライアント(毎回)</td><td>クライアント(1 回)</td><td>ハブ</td></tr>
+        <tr><th scope="row">クライアントに要るもの</th><td>なし</td><td>長時間開いておける接続</td><td>ハブから届く URL</td></tr>
+        <tr><th scope="row">遅れ</th><td>最大で <code>nextPollMs</code>(2 秒)</td><td>ほぼなし</td><td>ほぼなし</td></tr>
+        <tr><th scope="row">ハブが持つ状態</th><td>なし</td><td>接続している間だけ</td><td>購読の表(期限つき)</td></tr>
+        <tr><th scope="row">向いている相手</th><td>どのクライアントでも</td><td>ローカルのエージェント(pi)</td><td>サーバーとして動くもの(ChatGPT)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 6. filter -->
+<section aria-labelledby="s-filter">
+  <span class="eyebrow">PUT /services/:id</span>
+  <h2 id="s-filter">購読の条件は「payload の同名フィールドとの完全一致」だけ</h2>
+  <p>サービスが登録する <code>inputSchema</code> の各プロパティは、<code>payloadSchema</code> にある同じ名前のフィールドと比べる条件になります。payload にないフィルタは登録時に拒否します。ハブはサービスごとの条件の意味を知らなくても照合でき、3 つの方式すべてで同じ判定になります。</p>
+  <div class="filter-demo">
+    <div class="fcard">
+      <span class="label-small">購読</span>
+      <code>shop.order.created {"customer": "alice"}</code>
+    </div>
+    <div class="fcard ok">
+      <span class="label-small">イベント data</span>
+      <code>{"order_id":"o-alice-1","customer":"alice", …}</code>
+      <span class="verdict">customer が一致するので届く</span>
+    </div>
+    <div class="fcard ng">
+      <span class="label-small">イベント data</span>
+      <code>{"order_id":"o-bob-1","customer":"bob", …}</code>
+      <span class="verdict">一致しないのでログに残るだけ</span>
+    </div>
+  </div>
+</section>
+
+<!-- 7. pi -->
+<section aria-labelledby="s-pi">
+  <span class="eyebrow">pi/mcp-events.ts</span>
+  <h2 id="s-pi">pi の拡張は、イベントを「エージェントの次のターン」に変える</h2>
+  <p>pi は MCP のツールとリソースには対応していますが、MCP Events には対応していません。拡張がその部分を受け持ちます。拡張はハブのコードを読み込まず、通信仕様だけで話すので、MCP Events を話す他のサーバーにもそのままつながります。</p>
+  <div class="flow">
+    <div><h3>カタログを見る</h3><span class="mono">events_catalog</span><span>イベント名、条件に使える引数、payload のフィールドを一覧にし、いまの購読も表示します。</span></div>
+    <div><h3>購読する</h3><span class="mono">events_subscribe</span><span>名前、条件、届いたときの指示を受け取ります。ストリームが開くか最初の poll が成功してから結果を返すので、失敗はその場でわかります。</span></div>
+    <div><h3>イベントが届く</h3><span class="mono">sendMessage(triggerTurn)</span><span>eventId で重複を除いてから会話に入れ、新しいターンを起こします。payload は「外部から来た信頼できないデータ」と明記して渡します。</span></div>
+    <div><h3>やめる</h3><span class="mono">events_unsubscribe</span><span>ストリームや poll を止めます。webhook なら <code>events/unsubscribe</code> を呼び、受信サーバーも閉じます。</span></div>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>環境変数</th><th>既定値</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><code>MCP_EVENTS_HUB_URL</code></td><td><code>http://127.0.0.1:8787/mcp</code></td><td>ハブの MCP エンドポイント</td></tr>
+        <tr><td><code>MCP_EVENTS_HUB_TOKEN</code></td><td>なし</td><td>ハブに送る Bearer トークン</td></tr>
+        <tr><td><code>MCP_EVENTS_DELIVERY</code></td><td>push、なければ poll</td><td><code>push</code>、<code>poll</code>、<code>webhook</code> のどれか</td></tr>
+        <tr><td><code>MCP_EVENTS_CALLBACK_PORT</code></td><td><code>0</code>(空きポート)</td><td>webhook のとき 127.0.0.1 に開く受信ポート</td></tr>
+        <tr><td><code>MCP_EVENTS_TTL_MS</code></td><td><code>3600000</code></td><td>webhook 購読に求める TTL。残りの 8 割が過ぎたら subscribe し直す</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 8. usage -->
+<section aria-labelledby="s-use">
+  <span class="eyebrow">使い方</span>
+  <h2 id="s-use">ローカルで動かす</h2>
+  <p>依存パッケージはなく、Node.js 24 以上で <code>.ts</code> をそのまま実行します。</p>
+  <div class="cmd">
+    <ol>
+      <li><p>ハブを起動します。</p>
+<pre>HUB_ADMIN_TOKEN=dev-admin HUB_CLIENT_TOKENS=pi:dev-client \
+HUB_ALLOW_PRIVATE_CALLBACKS=1 npm start</pre></li>
+      <li><p>モックの shop サービスを登録し、注文を送ります。</p>
+<pre>npm run mock -- register
+npm run mock -- emit order.created \
+  '{"order_id":"o-1","customer":"alice","amount":1200,"currency":"JPY"}'
+npm run mock -- loop 5      <span class="k"># 5 秒ごとにランダムな注文</span></pre></li>
+      <li><p>pi を拡張付きで起動し、「shop.order.created を customer=alice で購読して、届いたら金額を報告して」と頼みます。</p>
+<pre>MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp \
+MCP_EVENTS_HUB_TOKEN=dev-client \
+pi --extension pi/mcp-events.ts</pre></li>
+      <li><p>通しで確かめるときは、リポジトリ直下の <code>.env</code> に <code>ANTHROPIC_API_KEY</code> を書いてからデモを実行します。<code>.env</code> は git の管理対象外です。</p>
+<pre>npm test        <span class="k"># LLM を使わない 31 件</span>
+npm run demo    <span class="k"># push / poll / webhook を実際の pi と Claude で 1 回ずつ</span></pre></li>
+    </ol>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>ハブの環境変数</th><th>既定値</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><code>PORT</code> / <code>HOST</code></td><td><code>8787</code> / <code>127.0.0.1</code></td><td>待ち受けアドレス</td></tr>
+        <tr><td><code>HUB_DB</code></td><td><code>.data/hub.db</code></td><td>SQLite のファイル。<code>:memory:</code> も使える</td></tr>
+        <tr><td><code>HUB_ADMIN_TOKEN</code></td><td>なし</td><td>サービス登録用のトークン。未設定なら登録できない</td></tr>
+        <tr><td><code>HUB_CLIENT_TOKENS</code></td><td>なし</td><td><code>principal:token,…</code>。未設定なら全員 anonymous で、webhook 購読は拒否する</td></tr>
+        <tr><td><code>HUB_ALLOW_PRIVATE_CALLBACKS</code></td><td>なし</td><td><code>1</code> で http とプライベートアドレスへの callback を許す(開発用)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 9. verification -->
+<section aria-labelledby="s-ver">
+  <span class="eyebrow">確かめたこと</span>
+  <h2 id="s-ver">3 方式とも、実際の pi と Claude で alice の注文だけに反応した</h2>
+  <div class="results">
+    <div class="result"><span class="num">31 / 31</span><span class="what"><code>npm test</code>。両方の世代のハンドシェイク、受信、3 方式、署名検証、再送、challenge 失敗、拡張の 3 方式と偽造の拒否</span></div>
+    <div class="result"><span class="num">push 7s</span><span class="what"><code>npm run demo</code>、<code>anthropic/claude-haiku-5-5</code>。<code>ORDER o-alice-1 4200 JPY</code> と返答</span></div>
+    <div class="result"><span class="num">poll 7s</span><span class="what">同じシナリオを poll で。bob の注文 ID はどの記録にも出てこない</span></div>
+    <div class="result"><span class="num">webhook 6s</span><span class="what">拡張が 127.0.0.1 に受信口を開き、ChatGPT と同じ経路をローカルで通した</span></div>
+  </div>
+</section>
+
+<!-- 10. gaps -->
+<section aria-labelledby="s-gap">
+  <span class="eyebrow">まだやっていないこと</span>
+  <h2 id="s-gap">試作で割り切った点</h2>
+  <ul class="gaps">
+    <li>webhook 本文の cursor は、そのイベント自身の連番です。再送待ちのイベントを考慮した値ではないので、保存した cursor が再送待ちの古いイベントを飛ばすことがあります。</li>
+    <li>callback 先はプライベートアドレスを拒否していますが、名前解決した接続先を固定していません。DNS rebinding の余地があります。</li>
+    <li><code>gap</code> と <code>terminated</code> の通知、カタログ変更の通知、<code>events/list</code> のページング、secret ローテーション時の二重署名、失敗率による配信停止は未実装です。</li>
+    <li>JSON Schema の検証は <code>type</code>、<code>properties</code>、<code>required</code>、<code>additionalProperties: false</code>、<code>enum</code>、<code>items</code> だけです。</li>
+    <li>拡張側の重複除去はテストで押さえていません。同じイベントの二重送信はハブが受信時に 1 件にまとめるため、再接続で二重に届く場合が残っています。</li>
+    <li>認証は静的な Bearer トークンです。公開して使うなら OAuth に置き換えます。</li>
+  </ul>
+</section>
+
+<section aria-labelledby="s-files">
+  <span class="eyebrow">ファイル</span>
+  <h2 id="s-files">どこに何があるか</h2>
+  <div class="files">
+    <code>src/protocol.ts</code><span>通信仕様の型、エラーコード、Standard Webhooks の署名と検証</span>
+    <code>src/hub.ts</code><span>ハブ本体。サービス API、MCP エンドポイント、3 つの配信、webhook の再送</span>
+    <code>src/store.ts</code><span>SQLite の 3 テーブル</span>
+    <code>src/schema.ts</code><span>JSON Schema の最小限の検証</span>
+    <code>mock/service.ts</code><span>テスト用の shop サービス(register / emit / loop)</span>
+    <code>pi/mcp-events.ts</code><span>pi の MCP Events クライアント拡張</span>
+    <code>test/</code><span>ハブのテストと、拡張を LLM なしで動かすテスト</span>
+    <code>scripts/pi-demo.ts</code><span>実際の pi と LLM で 3 方式を通すデモ</span>
+  </div>
+</section>
+
+<footer>仕様の出典は MCP Events の設計スケッチ(modelcontextprotocol/experimental-ext-triggers-events)と OpenAI の MCP Events ガイドです。プロトコル版は 2026-07-28 です。</footer>
+</div>
+
+<script>
+(() => {
+  const root = document.documentElement;
+  const themeBtn = document.getElementById("theme");
+  const order = ["auto", "light", "dark"];
+  const names = { auto: "自動", light: "ライト", dark: "ダーク" };
+  let theme = "auto";
+  try { theme = localStorage.getItem("hub-doc-theme") || "auto"; } catch (e) {}
+  const applyTheme = () => {
+    if (theme === "auto") root.removeAttribute("data-theme"); else root.setAttribute("data-theme", theme);
+    themeBtn.textContent = "配色: " + names[theme];
+  };
+  applyTheme();
+  themeBtn.addEventListener("click", () => {
+    theme = order[(order.indexOf(theme) + 1) % order.length];
+    try { localStorage.setItem("hub-doc-theme", theme); } catch (e) {}
+    applyTheme();
+  });
+
+  const topo = document.getElementById("topo");
+  const focusText = document.getElementById("focus-text");
+  const focusCopy = {
+    all: "3 つの方式はどれも同じイベントログを読みます。上のボタンで方式を選ぶと、その経路だけが残ります。",
+    webhook: "webhook はハブが接続を始めます。クライアントが登録した URL へ、イベントごとに署名付きで POST します。受け取る側は外から届く URL が要るので、ChatGPT のようなサーバー向けです。",
+    push: "push はクライアントが events/stream を 1 回送り、その接続を開いたままにします。ハブはイベントを SSE で流し続けます。公開 URL を持たない pi のようなローカルのエージェント向けです。",
+    poll: "poll はクライアントが events/poll を定期的に送り、cursor から先のイベントを受け取ります。ハブは状態を持たないので、どのクライアントでも使えます。"
+  };
+  document.querySelectorAll("[data-focus]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const f = btn.dataset.focus;
+      document.querySelectorAll("[data-focus]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      if (f === "all") topo.removeAttribute("data-focus"); else topo.setAttribute("data-focus", f);
+      focusText.textContent = focusCopy[f];
+    });
+  });
+
+  const steps = [...document.querySelectorAll("#seq .step")];
+  const caption = document.getElementById("seq-caption");
+  const prev = document.getElementById("seq-prev");
+  const next = document.getElementById("seq-next");
+  const play = document.getElementById("seq-play");
+  const reset = document.getElementById("seq-reset");
+  const copy = {
+    alice: [
+      "shop が注文イベントを、登録時にもらった secret で署名して POST します。shop が書くのはこの送信だけです。",
+      "ハブは署名を検証し、data が payloadSchema に合うかを確かめてから、ログに seq=6 として追記します。同じ eventId の再送なら記録しません。",
+      "ハブは 202 と seq を返します。shop の仕事はここで終わりです。",
+      "購読の条件 customer=alice と data.customer を比べます。一致したので、この購読者たちに配ります。",
+      "push の購読者(pi)には、開いたままの SSE ストリームに notifications/events/event を書き込みます。",
+      "webhook の購読者(ChatGPT)には、登録された callback URL へ署名付きで POST します。2xx 以外なら間隔を広げて再送します。",
+      "poll する側は次の問い合わせで cursor 5 から先を読み、o-6 を受け取って cursor を 6 に進めます。",
+      "pi の拡張はイベントを会話に入れて新しいターンを起こします。エージェントは購読時の指示どおり ORDER o-6 4200 JPY と返します。"
+    ],
+    bob: [
+      "shop が bob の注文イベントを署名付きで POST します。",
+      "ハブは同じように検証し、ログに seq=6 として追記します。条件に合わないイベントも記録はします。",
+      "ハブは 202 と seq を返します。",
+      "条件 customer=alice と data.customer=bob は一致しません。push と webhook には何も送りません。",
+      "push の購読者には何も届きません。",
+      "webhook の購読者にも何も届きません。",
+      "poll する側は cursor 5 から先を読みますが、一致するイベントがないので events は空です。cursor だけ 6 に進むので、同じ範囲を読み直すことはありません。",
+      "pi のエージェントは起こされません。bob の注文 ID は pi に一度も届きません。"
+    ]
+  };
+  let cust = "alice";
+  let current = 0;
+  let timer = null;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function render() {
+    steps.forEach((el, i) => {
+      const n = i + 1;
+      el.classList.toggle("future", n > current);
+      el.classList.toggle("current", n === current);
+      el.classList.toggle("skipped", cust === "bob" && el.dataset.deliver === "1" && n <= current);
+    });
+    document.querySelectorAll("#seq .v-text").forEach((t) => { t.textContent = t.dataset[cust]; });
+    document.querySelectorAll("#seq .v-note").forEach((g) => g.classList.toggle("ng", cust === "bob"));
+    caption.innerHTML = current === 0
+      ? "「次へ」で 1 ステップずつ進みます。顧客を bob に切り替えると、条件に合わないイベントの扱いが見られます。"
+      : "<b>" + current + " / " + steps.length + "</b>" + copy[cust][current - 1];
+    prev.disabled = current === 0;
+    next.disabled = current === steps.length;
+  }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } play.setAttribute("aria-pressed", "false"); play.textContent = "自動再生"; }
+  next.addEventListener("click", () => { stop(); if (current < steps.length) current++; render(); });
+  prev.addEventListener("click", () => { stop(); if (current > 0) current--; render(); });
+  reset.addEventListener("click", () => { stop(); current = 0; render(); });
+  play.addEventListener("click", () => {
+    if (timer) return stop();
+    if (current === steps.length) current = 0;
+    play.setAttribute("aria-pressed", "true"); play.textContent = "一時停止";
+    const tick = () => { if (current >= steps.length) return stop(); current++; render(); };
+    tick();
+    timer = setInterval(tick, reduce ? 3200 : 2200);
+  });
+  document.querySelectorAll("[data-cust]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      cust = btn.dataset.cust;
+      document.querySelectorAll("[data-cust]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      render();
+    });
+  });
+  render();
+
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  function selectTab(tab) {
+    tabs.forEach((t) => {
+      const on = t === tab;
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+    });
+  }
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => selectTab(tab));
+    tab.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const n = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      selectTab(n); n.focus(); e.preventDefault();
+    });
+  });
+})();
+</script>
+</body>
+</html>
