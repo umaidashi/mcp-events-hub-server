@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
@@ -445,5 +446,143 @@ describe("webhook", () => {
     } finally {
       await open.close();
     }
+  });
+});
+
+describe("admin", () => {
+  const VIEWS = ["overview", "services", "subscriptions", "events"];
+  const admin = (path: string, token: string | null = ADMIN) =>
+    fetch(`${hub.url}/admin/api/${path}`, token === null ? {} : { headers: { authorization: `Bearer ${token}` } });
+
+  async function view(path: string): Promise<any> {
+    const res = await admin(path);
+    assert.equal(res.status, 200, `GET /admin/api/${path}`);
+    return res.json();
+  }
+
+  async function eventually<T>(check: () => Promise<T>, message: string): Promise<NonNullable<T>> {
+    const deadline = Date.now() + 3000;
+    for (;;) {
+      const value = await check();
+      if (value) return value as NonNullable<T>;
+      if (Date.now() > deadline) assert.fail(`timed out: ${message}`);
+      await sleep(20);
+    }
+  }
+
+  test("every admin API needs the admin token", async () => {
+    for (const path of VIEWS) {
+      assert.equal((await admin(path, null)).status, 401, `${path} without a token`);
+      assert.equal((await admin(path, "wrong")).status, 401, `${path} with a wrong token`);
+      assert.equal((await admin(path, "t1")).status, 401, `${path} with a client token`);
+    }
+    const open = await startHub({ port: 0, db: ":memory:", adminToken: "", clientTokens: "" });
+    try {
+      for (const path of VIEWS) {
+        const res = await fetch(`${open.url}/admin/api/${path}`, { headers: { authorization: "Bearer " } });
+        assert.equal(res.status, 401, `${path} when no admin token is configured`);
+      }
+    } finally {
+      await open.close();
+    }
+  });
+
+  test("services list the registered catalog without the ingest secret", async () => {
+    const { services } = await view("services");
+    const listed = services.find((s: any) => s.id === "shop");
+    assert.equal(listed.name, "Shop");
+    assert.equal(listed.description, shop.description);
+    assert.deepEqual(listed.events, shop.events, "filter and payload schemas returned as registered");
+    assert.equal(typeof listed.updatedAt, "string");
+    assert.ok(services.every((s: any) => !("secret" in s)), "no secret field");
+    assert.ok(!JSON.stringify(services).includes(secret), "secret value absent");
+    const overview = await view("overview");
+    assert.equal(overview.services, services.length);
+    assert.equal(overview.eventTypes, services.reduce((n: number, s: any) => n + s.events.length, 0));
+  });
+
+  test("a webhook subscription shows live, then failing, and never its secret", async () => {
+    const hook = receiver.hook({ statuses: [410] });
+    const sub = (await subscribe(hook, "a-hook")).body.result;
+    const find = async () => (await view("subscriptions")).webhooks.find((w: any) => w.id === sub.id);
+    const live = await find();
+    assert.equal(live.state, "live");
+    assert.equal(live.principal, "tester");
+    assert.equal(live.name, CREATED);
+    assert.deepEqual(live.arguments, { customer: "a-hook" });
+    assert.equal(live.url, hook.url);
+    assert.equal(live.refreshBefore, sub.refreshBefore);
+    assert.equal(live.lastError, null);
+    const failingBefore = (await view("overview")).webhooks.failing;
+
+    await emit(hub.url, secret, "order.created", order("a-hook"));
+    const failing = await eventually(async () => {
+      const w = await find();
+      return w.state === "failing" && w;
+    }, "subscription marked failing");
+    assert.equal(failing.lastError, "http_4xx");
+    assert.equal((await view("overview")).webhooks.failing, failingBefore + 1, "overview counts it as failing");
+    const all = await view("subscriptions");
+    assert.ok(all.webhooks.every((w: any) => !("secret" in w)), "no secret field");
+    assert.ok(!JSON.stringify(all).includes(hook.secret), "client secret absent");
+  });
+
+  test("a push stream is listed while open and gone after the client disconnects", async () => {
+    const before = (await view("overview")).pushStreams;
+    const stream = await openStream(77, { name: CREATED, arguments: { customer: "a-push" }, cursor: null });
+    await stream.next("notifications/events/active");
+    await emit(hub.url, secret, "order.created", order("a-push"));
+    const event = await stream.next("notifications/events/event");
+
+    const entry = (await view("subscriptions")).push.find((p: any) => p.id === 77);
+    assert.ok(entry, "open stream listed");
+    assert.equal(entry.principal, "tester");
+    assert.equal(entry.name, CREATED);
+    assert.deepEqual(entry.arguments, { customer: "a-push" });
+    assert.equal(typeof entry.connectedAt, "string");
+    assert.equal(entry.cursor, event.params.cursor, "cursor is the last event sent");
+    assert.equal((await view("overview")).pushStreams, before + 1);
+
+    stream.close();
+    await eventually(async () => !(await view("subscriptions")).push.some((p: any) => p.id === 77), "stream removed after disconnect");
+    assert.equal((await view("overview")).pushStreams, before);
+  });
+
+  test("recent events come newest first and honor the limit", async () => {
+    const countBefore = (await view("overview")).events;
+    for (const id of ["evt_admin_1", "evt_admin_2", "evt_admin_3"]) await emit(hub.url, secret, "order.created", order("a-events"), id);
+    assert.equal((await view("overview")).events, countBefore + 3, "stored event count");
+
+    const { events } = await view("events?limit=2");
+    assert.deepEqual(events.map((e: any) => e.eventId), ["evt_admin_3", "evt_admin_2"]);
+    assert.ok(events[0].seq > events[1].seq, "seq descending");
+    assert.equal(events[0].name, CREATED);
+    assert.equal(events[0].data.customer, "a-events");
+
+    for (let n = countBefore + 3; n <= 200; n++) await emit(hub.url, secret, "order.created", order("a-fill"));
+    assert.equal((await view("events?limit=1000")).events.length, 200, "limit capped at 200");
+    assert.equal((await view("events")).events.length, 50, "default limit");
+  });
+
+  test("GET /admin is a locked-down page with no hub data in it", async () => {
+    const res = await fetch(`${hub.url}/admin`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type")!, /^text\/html/);
+    const csp = res.headers.get("content-security-policy")!;
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /connect-src 'self'/);
+    assert.match(csp, /frame-ancestors 'none'/);
+    assert.equal(res.headers.get("x-frame-options"), "DENY");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+
+    const html = await res.text();
+    for (const [tag, directive] of [["script", "script-src"], ["style", "style-src"]]) {
+      const inline = [...html.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g"))].map((m) => m[1]);
+      assert.equal(inline.length, 1, `one inline ${tag}`);
+      const hash = createHash("sha256").update(inline[0]).digest("base64");
+      assert.ok(csp.includes(`${directive} 'sha256-${hash}'`), `${directive} admits the inline ${tag}`);
+    }
+    assert.ok(!html.includes(secret), "no ingest secret");
+    assert.ok(!html.includes("evt_admin_1") && !html.includes("a-events"), "no logged events");
   });
 });

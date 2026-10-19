@@ -26,6 +26,9 @@ export type Subscription = {
   lastError: string | null;
 };
 
+// A registered service as the admin screen lists it. The ingest secret is never selected.
+export type ServiceSummary = ServiceRegistration & { id: string; updatedAt: string };
+
 export type Store = ReturnType<typeof openStore>;
 
 // One statement per entry: node:sqlite's prepare() silently drops everything after the first.
@@ -94,6 +97,15 @@ export function openStore(sql: Sql) {
       return { seq: one("SELECT seq FROM events WHERE name = ? AND event_id = ?", e.name, e.eventId).seq, duplicate: true };
     },
 
+    services: (): ServiceSummary[] =>
+      sql.exec("SELECT id, name, description, events_json, updated_at FROM services ORDER BY id").map((r) => ({
+        id: r.id, name: r.name, description: r.description ?? undefined, events: JSON.parse(r.events_json), updatedAt: r.updated_at,
+      })),
+
+    eventCount: (): number => one("SELECT COUNT(*) AS n FROM events").n,
+
+    recentEvents: (limit: number): LoggedEvent[] => sql.exec("SELECT * FROM events ORDER BY seq DESC LIMIT ?", limit).map(toEvent),
+
     head: (): number => one("SELECT COALESCE(MAX(seq), 0) AS head FROM events").head,
 
     // Paged so a caller that stops early (poll's maxEvents) never loads the whole backlog.
@@ -111,6 +123,8 @@ export function openStore(sql: Sql) {
       const r = one("SELECT * FROM subscriptions WHERE id = ?", id);
       return r && toSubscription(r);
     },
+
+    subscriptions: (): Subscription[] => sql.exec("SELECT * FROM subscriptions ORDER BY name, principal, id").map(toSubscription),
 
     liveSubscriptions: (name: string, now: string): Subscription[] =>
       sql.exec(

@@ -74,13 +74,25 @@ npm run cf:types                                          # .cloudflare/types/in
 
 デプロイには `cf auth login` か `CLOUDFLARE_API_TOKEN` が必要です。`.cloudflare/` はビルドと型の生成物なので git 管理外です。
 
+## 管理画面
+
+ハブを起動したら、ブラウザで `/admin`(Node.js なら http://127.0.0.1:8787/admin、`cf dev` なら http://127.0.0.1:5173/admin)を開きます。最初に `HUB_ADMIN_TOKEN` の値を入れると、そのタブを閉じるまでブラウザの sessionStorage に保存します。
+
+画面の上段には、サービス数、イベント種別の数、webhook 購読の数(有効、失敗中、期限切れの内訳)、開いている push ストリームの数、保存したイベントの数が並びます。その下の 3 つのタブで詳細を確認します。
+
+- サービス。登録済みのサービスと、イベントごとのフィルタと payload のフィールドを一覧します。フォームから `PUT /services/:id` と同じ検証でサービスを登録できます。登録に成功すると ingest secret を 1 回だけ表示します。
+- 購読。webhook 購読の状態、principal、フィルタ、callback URL、期限、最終配信、最終エラーと、いま開いている push ストリームを一覧します。poll はハブに状態を残さないので一覧はありません。
+- 最近のイベント。イベントログを新しい順に 50 件表示します。
+
+画面が読む API は `GET /admin/api/overview`、`/admin/api/services`、`/admin/api/subscriptions`、`/admin/api/events?limit=50`(最大 200)で、どれも `Authorization: Bearer $HUB_ADMIN_TOKEN` が必要です。ingest secret と webhook の secret はどの API も返しません。
+
 ## 設定
 
 | 環境変数 | 既定値 | 内容 |
 |---|---|---|
 | `PORT` / `HOST` | `8787` / `127.0.0.1` | Node.js の待ち受けアドレス |
 | `HUB_DB` | `.data/hub.db` | Node.js の SQLite ファイル。`:memory:` も可 |
-| `HUB_ADMIN_TOKEN` | なし | サービス登録用の Bearer トークン。未設定なら登録できない |
+| `HUB_ADMIN_TOKEN` | なし | サービス登録と管理画面の Bearer トークン。未設定なら登録も管理画面の API も使えない |
 | `HUB_CLIENT_TOKENS` | なし | `principal:token,...`。未設定なら全員 `anonymous` になり、webhook 購読は拒否される |
 | `HUB_ALLOW_PRIVATE_CALLBACKS` | なし | `1` で http とプライベートアドレスへの callback を許可する(開発用) |
 
@@ -117,7 +129,7 @@ Cloudflare では `HUB_ADMIN_TOKEN` と `HUB_CLIENT_TOKENS` を秘密情報と�
 
 ## 検証
 
-- `npm test` は 31 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
+- `npm test` は 37 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗、管理画面の API と CSP を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
 - `node scripts/smoke.ts <ハブの URL>` は動いているハブに HTTP で接続し、`server/discover`、shop の登録、署名が違う ingest の拒否、poll(alice には届き bob には届かない)、push の `active` と配信、webhook の challenge と署名付き配信と購読解除を確認します。結果を 1 行ずつ出し、すべて通れば終了コード 0 です。トークンは `HUB_ADMIN_TOKEN`(既定 `dev-admin`)と `HUB_CLIENT_TOKEN`(既定 `dev-client`)で渡します。
   - `PI_DEMO_INSTALLED=1` を付けると、`--extension` を使わず、デモ用の設定ディレクトリ `.data/pi-agent` にインストールした拡張を読み込みます。先に `PI_CODING_AGENT_DIR=$PWD/.data/pi-agent pi install $PWD` でインストールしておきます。webhook の確認には、127.0.0.1 への http callback を許すハブが必要です。`npm start` を上の例どおりに起動した場合と、`npm run cf:dev` の場合はそのまま通ります。
 - `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。
