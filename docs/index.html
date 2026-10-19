@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Events Hub</title>
+<meta name="description" content="上流サービスのイベントを、どのベンダーのAIエージェントにも中継するMCP Eventsのハブ。">
+<style>
+:root {
+  --paper: #f3f5f7; --surface: #ffffff; --sunk: #e8ecf0; --ink: #15202b; --muted: #566472; --rule: #d3dae1;
+  --hub: #0f5257; --hub-soft: #dcebea; --svc: #5a6748; --push: #2655b8; --poll: #9a5c00; --webhook: #a3336b; --ok: #2f7d4f;
+  --serif: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif JP", serif;
+  --sans: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans JP", system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e1419; --surface: #151d24; --sunk: #1b252e; --ink: #e4eaf0; --muted: #94a3b1; --rule: #2a3743;
+    --hub: #63b7b4; --hub-soft: #173032; --svc: #a6b58c; --push: #84a8f2; --poll: #e2a64c; --webhook: #e47fb1; --ok: #6cc591;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="light"] {
+  --paper: #f3f5f7; --surface: #ffffff; --sunk: #e8ecf0; --ink: #15202b; --muted: #566472; --rule: #d3dae1;
+  --hub: #0f5257; --hub-soft: #dcebea; --svc: #5a6748; --push: #2655b8; --poll: #9a5c00; --webhook: #a3336b; --ok: #2f7d4f;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --paper: #0e1419; --surface: #151d24; --sunk: #1b252e; --ink: #e4eaf0; --muted: #94a3b1; --rule: #2a3743;
+  --hub: #63b7b4; --hub-soft: #173032; --svc: #a6b58c; --push: #84a8f2; --poll: #e2a64c; --webhook: #e47fb1; --ok: #6cc591;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 var(--sans); }
+a { color: var(--hub); }
+code, pre { font-family: var(--mono); font-size: .86em; }
+:focus-visible { outline: 2px solid var(--hub); outline-offset: 2px; }
+.page { max-width: 1080px; margin: 0 auto; padding: 0 20px 80px; }
+
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.brand { font-family: var(--mono); font-size: 14px; color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; gap: 10px; }
+.brand .mark { display: inline-grid; grid-template-columns: repeat(3, 6px); gap: 2px; }
+.brand .mark i { width: 6px; height: 14px; background: var(--hub); border-radius: 1px; }
+.brand .mark i:nth-child(2) { opacity: .6; } .brand .mark i:nth-child(3) { opacity: .3; }
+nav.links { display: flex; gap: 16px; align-items: center; font-size: 14px; flex-wrap: wrap; }
+nav.links a { color: var(--muted); text-decoration: none; }
+nav.links a:hover { color: var(--ink); }
+.theme-toggle { font: 13px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 40px; align-items: center; padding: 56px 0 40px; }
+.hero h1, section h2 { word-break: auto-phrase; }
+.hero h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4vw, 42px); line-height: 1.3; margin: 0 0 18px; text-wrap: balance; }
+.hero p { margin: 0 0 22px; color: var(--muted); max-width: 34em; }
+.hero p strong { color: var(--ink); font-weight: 600; }
+.cta { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; font: 600 14px var(--sans); text-decoration: none; padding: 10px 16px; border-radius: 7px; border: 1px solid var(--rule); color: var(--ink); background: var(--surface); }
+.btn.primary { background: var(--hub); border-color: var(--hub); color: var(--surface); }
+
+.term { margin: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; min-width: 0; }
+.term .bar { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; padding: 9px 14px; border-bottom: 1px solid var(--rule); font: 12px var(--mono); color: var(--muted); background: var(--paper); }
+.term pre { margin: 0; padding: 14px 16px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.75; }
+.term .k { color: var(--muted); }
+.term .svc { color: var(--svc); }
+.term .push { color: var(--push); }
+.term .ok { color: var(--ok); font-weight: 600; }
+.term .tool { color: var(--hub); }
+
+section { padding: 56px 0 8px; border-top: 1px solid var(--rule); margin-top: 32px; display: grid; gap: 18px; }
+section > * { min-width: 0; }
+section h2 { font-family: var(--serif); font-weight: 600; font-size: clamp(22px, 3vw, 30px); line-height: 1.4; margin: 0; text-wrap: balance; }
+section p { margin: 0; max-width: 66ch; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .06em; color: var(--hub); }
+
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 0; border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.split > div { padding: 20px 22px; display: grid; gap: 12px; align-content: start; }
+.split > div + div { border-left: 1px solid var(--rule); background: var(--hub-soft); }
+.split h3 { margin: 0; font-size: 15px; }
+.split ol, .split ul { margin: 0; padding-left: 1.3em; display: grid; gap: 8px; font-size: 14.5px; }
+.split .who { font: 12px var(--mono); color: var(--muted); }
+
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.mode { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; display: grid; gap: 8px; align-content: start; border-top-width: 4px; }
+.mode.webhook { border-top-color: var(--webhook); }
+.mode.push { border-top-color: var(--push); }
+.mode.poll { border-top-color: var(--poll); }
+.mode h3 { margin: 0; font: 600 16px var(--mono); }
+.mode.webhook h3 { color: var(--webhook); } .mode.push h3 { color: var(--push); } .mode.poll h3 { color: var(--poll); }
+.mode p { font-size: 14px; }
+.mode .for { font-size: 13px; color: var(--muted); }
+
+.steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 18px; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 2.2em minmax(0, 1fr); gap: 4px 12px; counter-increment: s; }
+.steps li::before { content: counter(s); font: 600 14px var(--mono); color: var(--hub); border: 1px solid var(--hub); border-radius: 50%; width: 1.9em; height: 1.9em; display: grid; place-items: center; grid-row: span 2; }
+.steps p { font-size: 15px; }
+pre.cmd { margin: 0; background: var(--sunk); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.6; font-size: 12.5px; }
+pre.cmd .k { color: var(--muted); }
+
+.deep { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 22px; text-decoration: none; color: var(--ink); }
+.deep:hover { border-color: var(--hub); }
+.deep h3 { margin: 0 0 6px; font-family: var(--serif); font-size: 19px; }
+.deep p { color: var(--muted); font-size: 14px; }
+.deep .arrow { font: 600 22px var(--mono); color: var(--hub); }
+
+.verified { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.verified div { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px; display: grid; gap: 4px; }
+.verified b { font: 600 20px var(--mono); color: var(--ok); font-variant-numeric: tabular-nums; }
+.verified span { font-size: 13px; color: var(--muted); }
+
+footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--muted); display: grid; gap: 6px; }
+
+@media (max-width: 820px) {
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-top: 36px; }
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .split > div + div { border-left: none; border-top: 1px solid var(--rule); }
+  .modes { grid-template-columns: minmax(0, 1fr); }
+  .deep { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="topbar">
+  <a class="brand" href="./"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>mcp-events-hub-server</a>
+  <nav class="links" aria-label="ページ内リンク">
+    <a href="#how">しくみ</a>
+    <a href="#start">動かす</a>
+    <a href="mcp-events-hub.html">設計の図解</a>
+    <a href="https://github.com/umaidashi/mcp-events-hub-server">GitHub</a>
+    <button class="theme-toggle" id="theme" type="button" aria-label="配色を切り替える">配色: 自動</button>
+  </nav>
+</div>
+
+<header class="hero">
+  <div>
+    <h1>サービスのイベントを、どのAIエージェントにも届ける</h1>
+    <p>MCP Events Hubは、上流サービスとクライアントエージェントの間に立つMCPサーバーです。サービスが実装するのは<strong>イベント定義の登録と、署名付きwebhookの送信</strong>の2つだけです。エージェントは<strong>ハブ1か所</strong>に接続し、全サービスのイベントを1つのカタログから購読します。</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/umaidashi/mcp-events-hub-server">GitHubで見る</a>
+      <a class="btn" href="mcp-events-hub.html">設計の図解を見る</a>
+    </div>
+  </div>
+  <figure class="term" aria-label="実際のデモの出力">
+    <div class="bar"><span>npm run demo</span><span>pi + claude-haiku-5-5</span></div>
+<pre><span class="tool">[tool]</span> events_catalog {}
+<span class="tool">[tool]</span> events_subscribe {"name":"shop.order.created",
+       "arguments":{"customer":"alice"},
+       "instructions":"reply with one line: ORDER ..."}
+<span class="k">[assistant]</span> Subscribed to shop.order.created for customer alice.
+<span class="svc">[emit]</span> o-bob-1 for bob -&gt; HTTP 202
+<span class="svc">[emit]</span> o-alice-1 for alice -&gt; HTTP 202
+<span class="push">[mcp-event]</span> shop.order.created (eventId evt-o-alice-1)
+<span class="k">[assistant]</span> ORDER o-alice-1 4200 JPY
+<span class="ok">PASS push (7s) · PASS poll (7s) · PASS webhook (6s)</span></pre>
+  </figure>
+</header>
+
+<section id="how" aria-labelledby="h-split">
+  <span class="eyebrow">サービス側の実装</span>
+  <h2 id="h-split">MCP Eventsの重い部分は、ハブが1回だけ実装する</h2>
+  <p>MCP Eventsに対応するには、購読の保存、TTL、callbackの検証、署名、再送、3つの配信方式が必要です。ハブがない場合、これをサービスごとに作ることになり、エージェントの接続先もサービスの数だけ増えます。</p>
+  <div class="split">
+    <div>
+      <span class="who">サービスが書くもの</span>
+      <ol>
+        <li><code>PUT /services/:id</code>でイベント定義を登録する</li>
+        <li>イベントが起きたら、もらったsecretで署名して<code>POST /services/:id/events</code>に送る</li>
+      </ol>
+    </div>
+    <div>
+      <span class="who">ハブが引き受けるもの</span>
+      <ul>
+        <li>全サービスのイベントを<code>&lt;service&gt;.&lt;event&gt;</code>の名前で並べたカタログ</li>
+        <li>追記専用のイベントログ。cursorはこのログの連番</li>
+        <li>購読条件の照合。条件はpayloadの同名フィールドとの完全一致</li>
+        <li>webhook購読の保存、TTL、callbackの検証、Standard Webhooksの署名、再送</li>
+        <li>MCPの新旧2世代(2026-07-28と2025-11-25以前)への対応</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="h-modes">
+  <span class="eyebrow">配信方式</span>
+  <h2 id="h-modes">3つの配信方式で、特定のベンダーに依存しない</h2>
+  <p>MCP Eventsのドラフト仕様にある3方式をすべて実装しています。どの方式も同じイベントログを読むので、届くイベントとcursorは同じです。</p>
+  <div class="modes">
+    <div class="mode webhook">
+      <h3>webhook</h3>
+      <p>ハブが、登録されたURLへイベントごとに署名付きでPOSTします。</p>
+      <span class="for">サーバーとして動くクライアント向け。ChatGPTが使う方式です。</span>
+    </div>
+    <div class="mode push">
+      <h3>push</h3>
+      <p>クライアントが<code>events/stream</code>を1回送り、SSEの接続を開いたまま待ちます。</p>
+      <span class="for">公開URLを持たないローカルのエージェント向け。piの拡張の既定です。</span>
+    </div>
+    <div class="mode poll">
+      <h3>poll</h3>
+      <p>クライアントが<code>events/poll</code>を定期的に送り、cursorから先を受け取ります。</p>
+      <span class="for">長い接続を張れないクライアントでも使えます。</span>
+    </div>
+  </div>
+</section>
+
+<section id="start" aria-labelledby="h-start">
+  <span class="eyebrow">動かす</span>
+  <h2 id="h-start">ローカルで、ハブとモックのサービスとpiをつなぐ</h2>
+  <p>依存パッケージなしで、Node.js 24以上で<code>.ts</code>をそのまま実行します。</p>
+  <ol class="steps">
+    <li><p>ハブを起動します。</p>
+<pre class="cmd">HUB_ADMIN_TOKEN=dev-admin HUB_CLIENT_TOKENS=pi:dev-client \
+HUB_ALLOW_PRIVATE_CALLBACKS=1 npm start</pre></li>
+    <li><p>モックのshopサービスを登録し、注文イベントを送ります。</p>
+<pre class="cmd">npm run mock -- register
+npm run mock -- loop 5      <span class="k"># 5秒ごとにランダムな注文</span></pre></li>
+    <li><p>piを拡張付きで起動し、「shop.order.createdをcustomer=aliceで購読して、届いたら金額を報告して」と頼んでください。</p>
+<pre class="cmd">MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp \
+MCP_EVENTS_HUB_TOKEN=dev-client \
+pi --extension pi/mcp-events.ts</pre></li>
+  </ol>
+  <p>piの拡張は<code>events_catalog</code>、<code>events_subscribe</code>、<code>events_unsubscribe</code>の3つのツールを持ちます。届いたイベントは会話に入り、エージェントの新しいターンが始まります。</p>
+</section>
+
+<section aria-labelledby="h-ver">
+  <span class="eyebrow">確かめたこと</span>
+  <h2 id="h-ver">3方式とも、実際のpiとClaudeで条件に合う注文だけに反応した</h2>
+  <div class="verified">
+    <div><b>31 / 31</b><span><code>npm test</code>。LLMを使わずに、受信、3方式、署名検証、再送、拡張の動きを確かめるテスト</span></div>
+    <div><b>3 / 3</b><span><code>npm run demo</code>。push、poll、webhookの順に、piがaliceの注文にだけ返事をした</span></div>
+    <div><b>0件</b><span>購読条件に合わないbobの注文がpiに届いた回数</span></div>
+  </div>
+</section>
+
+<section aria-labelledby="h-deep">
+  <a class="deep" href="mcp-events-hub.html">
+    <div>
+      <h3 id="h-deep">設計の図解</h3>
+      <p>構成図、イベントログとcursor、1件のイベントが届くまでのシーケンス、3方式の実際の通信、piの拡張の動きを、図と操作できる例で説明しています。</p>
+    </div>
+    <span class="arrow" aria-hidden="true">→</span>
+  </a>
+</section>
+
+<footer>
+  <span>仕様の出典は<a href="https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/main/docs/design-sketch-proposal.md">MCP Eventsの設計スケッチ</a>と<a href="https://developers.openai.com/plugins/build/mcp-events">OpenAIのMCP Eventsガイド</a>です。</span>
+  <span><a href="https://github.com/umaidashi/mcp-events-hub-server">github.com/umaidashi/mcp-events-hub-server</a></span>
+</footer>
+</div>
+<script>
+(() => {
+  const root = document.documentElement, btn = document.getElementById("theme");
+  const order = ["auto", "light", "dark"], names = { auto: "自動", light: "ライト", dark: "ダーク" };
+  let theme = "auto";
+  try { theme = localStorage.getItem("hub-doc-theme") || "auto"; } catch (e) {}
+  const apply = () => { theme === "auto" ? root.removeAttribute("data-theme") : root.setAttribute("data-theme", theme); btn.textContent = "配色: " + names[theme]; };
+  apply();
+  btn.addEventListener("click", () => {
+    theme = order[(order.indexOf(theme) + 1) % order.length];
+    try { localStorage.setItem("hub-doc-theme", theme); } catch (e) {}
+    apply();
+  });
+})();
+</script>
+</body>
+</html>
