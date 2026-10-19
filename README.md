@@ -10,6 +10,164 @@
 
 設計と使い方を図にしたページは [`docs/mcp-events-hub.html`](docs/mcp-events-hub.html) です。ブラウザで直接開けます。
 
+## アーキテクチャ(C4 モデル)
+
+C4 モデルのレベル1から3(コンテキスト、コンテナ、コンポーネント)と、デプロイの図で、MCP Events Hub の構造を示します。図は Mermaid の flowchart で描き、C4 の表記にあわせて、要素の種類を `[Person]`、`[Software System]`、`[Container: 技術]`、`[Component: 技術]` のように書いています。青が MCP Events Hub、灰色が外部のシステムです。
+
+### レベル1 システムコンテキスト
+
+誰が、どのシステムが、MCP Events Hub とどうやり取りするかを示します。
+
+```mermaid
+flowchart LR
+  user["<b>利用者</b><br/>[Person]<br/>購読するイベントと、届いたときの指示をエージェントに頼む"]
+  operator["<b>運用者</b><br/>[Person]<br/>サービスを登録し、購読の状況を確かめる"]
+  service["<b>上流サービス</b><br/>[Software System]<br/>shop など。自分のイベントを登録して送る"]
+  hub["<b>MCP Events Hub</b><br/>[Software System]<br/>全サービスのイベントを1つのカタログにまとめ、購読者へ中継する MCP サーバー"]
+  agent["<b>クライアントエージェント</b><br/>[Software System]<br/>pi とこのリポジトリの拡張、ChatGPT、他の MCP クライアント"]
+  llm["<b>LLM プロバイダ</b><br/>[Software System]<br/>Anthropic API など"]
+
+  service -- "イベント定義を登録し、<br/>イベントを署名付きで送る<br/>[HTTPS]" --> hub
+  agent -- "カタログを見て購読する<br/>[MCP Events]" --> hub
+  hub -- "イベントを配信する<br/>[webhook / push / poll]" --> agent
+  user -- "購読と指示を頼む" --> agent
+  agent -- "届いたイベントで<br/>新しいターンを回す [HTTPS]" --> llm
+  operator -- "管理画面を使う<br/>[HTTPS]" --> hub
+
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef system fill:#1168bd,stroke:#0b4884,color:#fff
+  classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#fff
+  class user,operator person
+  class hub system
+  class service,agent,llm external
+```
+
+### レベル2 コンテナ
+
+MCP Events Hub と、このリポジトリが提供するクライアント側の部品を、動く単位に分けて示します。
+
+```mermaid
+flowchart LR
+  operator["<b>運用者</b><br/>[Person]"]
+  service["<b>上流サービス</b><br/>[Software System]<br/>モックは mock/service.ts"]
+  chatgpt["<b>ChatGPT など</b><br/>[Software System]<br/>webhook を受け取る MCP クライアント"]
+
+  subgraph hubSystem["MCP Events Hub [Software System]"]
+    admin["<b>管理画面</b><br/>[Container: HTML と JavaScript]<br/>GET /admin。サービス登録と購読の確認"]
+    hubServer["<b>ハブサーバー</b><br/>[Container: TypeScript。Node.js 24 か Cloudflare Worker と Durable Object]<br/>サービス API、MCP エンドポイント、3つの配信方式、管理 API を1つの fetch ハンドラで提供する"]
+    store[("<b>イベントストア</b><br/>[Container: SQLite]<br/>services、events(追記専用のログ)、subscriptions")]
+  end
+
+  subgraph piSystem["pi エージェント [Software System]"]
+    piExt["<b>pi 拡張</b><br/>[Container: TypeScript。pi/mcp-events.ts]<br/>events_catalog、events_subscribe、events_unsubscribe と、イベントの受信"]
+  end
+
+  service -- "PUT /services/:id<br/>POST /services/:id/events<br/>[HTTPS、Standard Webhooks 署名]" --> hubServer
+  operator -- "使う" --> admin
+  admin -- "/admin/api/* と PUT /services/:id<br/>[HTTPS、管理者トークン]" --> hubServer
+  hubServer -- "読み書きする [SQL]" --> store
+  piExt -- "events/list、events/stream、<br/>events/poll、events/subscribe<br/>[MCP、Bearer トークン]" --> hubServer
+  hubServer -- "SSE か POST /callback/n<br/>[push / webhook]" --> piExt
+  chatgpt -- "events/subscribe [MCP]" --> hubServer
+  hubServer -- "署名付き POST [webhook]" --> chatgpt
+
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#fff
+  class operator person
+  class admin,hubServer,store,piExt container
+  class service,chatgpt external
+```
+
+### レベル3 コンポーネント(ハブサーバー)
+
+ハブサーバー(`src/hub.ts` の `createHub`)の中の部品を示します。Node と Cloudflare のどちらで動かしても、この中身は同じです。
+
+```mermaid
+flowchart TB
+  service["<b>上流サービス</b><br/>[Software System]"]
+  client["<b>MCP クライアント</b><br/>[Software System]<br/>pi 拡張、ChatGPT など"]
+  admin["<b>管理画面</b><br/>[Container]"]
+
+  subgraph hubServer["ハブサーバー [Container]"]
+    router["<b>ルーター</b><br/>[Component: fetch ハンドラ]<br/>パスで振り分け、Origin とトークンを確かめる"]
+    serviceApi["<b>サービス API</b><br/>[Component: registerService、ingest]<br/>定義、署名、payload を検証してログに追記する"]
+    mcp["<b>MCP エンドポイント</b><br/>[Component: POST /mcp]<br/>server/discover と initialize、events/list"]
+    adminApi["<b>管理 API</b><br/>[Component: /admin/api/*]<br/>集計、サービス、購読、最近のイベント"]
+    poll["<b>poll</b><br/>[Component: events/poll]<br/>cursor から先をログから読む。状態を持たない"]
+    push["<b>push</b><br/>[Component: events/stream]<br/>SSE。接続中の購読者を持ち、heartbeat を送る"]
+    webhook["<b>webhook</b><br/>[Component: events/subscribe、deliver]<br/>callback の検証、TTL、署名付きの配信と再送"]
+    matcher["<b>照合</b><br/>[Component: matches]<br/>購読条件と payload の同名フィールドの完全一致"]
+    storeC["<b>ストア</b><br/>[Component: openStore]<br/>小さな SQL 窓口の上で、ログ、サービス、購読を読み書きする"]
+  end
+  db[("<b>イベントストア</b><br/>[Container: SQLite]")]
+
+  service -- "登録と送信 [HTTPS]" --> router
+  client -- "MCP [HTTPS]" --> router
+  admin -- "管理 API [HTTPS]" --> router
+  router --> serviceApi
+  router --> mcp
+  router --> adminApi
+  mcp --> poll
+  mcp --> push
+  mcp --> webhook
+  serviceApi -- "追記したイベントを渡す" --> push
+  serviceApi -- "追記したイベントを渡す" --> webhook
+  poll --> matcher
+  push --> matcher
+  webhook --> matcher
+  webhook -- "署名付き POST [HTTPS]" --> client
+  serviceApi --> storeC
+  poll --> storeC
+  webhook --> storeC
+  adminApi --> storeC
+  storeC -- "SQL" --> db
+
+  classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#fff
+  class router,serviceApi,mcp,adminApi,poll,push,webhook,matcher,storeC component
+  class admin,db container
+  class service,client external
+```
+
+### デプロイ
+
+同じハブサーバーを、Node、Docker、Cloudflare のどれにも置けます。枠は配置先(Deployment Node)です。
+
+```mermaid
+flowchart LR
+  subgraph nodeHost["Node.js 24 のホスト"]
+    nodeEntry["<b>src/node.ts</b><br/>[Container: node:http]<br/>DNS を引いて callback 先を確かめる"]
+    nodeDb[("<b>SQLite ファイル</b><br/>[Container: node:sqlite]<br/>HUB_DB。既定は .data/hub.db")]
+    nodeEntry -- "SQL" --> nodeDb
+  end
+
+  subgraph docker["Docker Compose(compose.yaml)"]
+    dHub["<b>hub</b><br/>[Container: src/node.ts]<br/>127.0.0.1:8787 に公開"]
+    dDb[("<b>hub-data</b><br/>[Container: SQLite のボリューム]")]
+    dService["<b>service</b><br/>[Container: mock/service.ts]<br/>登録してから注文を送り続ける"]
+    dClient["<b>client / check</b><br/>[Container: pi と拡張]<br/>webhook の受け口は :9100"]
+    dService -- "登録と送信" --> dHub
+    dClient -- "MCP" --> dHub
+    dHub -- "webhook" --> dClient
+    dHub -- "SQL" --> dDb
+  end
+
+  subgraph cf["Cloudflare"]
+    subgraph worker["Worker: mcp-events-hub"]
+      subgraph dobj["Durable Object: EventsHub"]
+        cfHub["<b>ハブサーバー</b><br/>[Container: src/worker.ts から同じ createHub]<br/>Durable Object は1つだけ"]
+        cfDb[("<b>SQLite</b><br/>[Container: Durable Object のストレージ]")]
+        cfHub -- "SQL" --> cfDb
+      end
+    end
+  end
+
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  class nodeEntry,nodeDb,cfHub,cfDb,dHub,dDb,dService,dClient container
+```
+
 ## 必要なもの
 
 | もの | 使う場面 |
