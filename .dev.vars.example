@@ -1,0 +1,3 @@
+# Local secrets for `npm run cf:dev`. Copy to .dev.vars (gitignored); the Worker reads only these names.
+HUB_ADMIN_TOKEN=dev-admin
+HUB_CLIENT_TOKENS=pi:dev-client

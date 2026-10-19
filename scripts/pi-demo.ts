@@ -1,10 +1,12 @@
 // End-to-end proof with a real LLM: pi subscribes through the hub and reacts to a filtered event,
-// once per delivery mode, each with a fresh hub and a fresh pi process.
-// Usage: ANTHROPIC_API_KEY=... node scripts/pi-demo.ts   (PI_DEMO_DELIVERY=push|poll|webhook|all, PI_DEMO_MODEL=<provider>/<model>)
+// once per delivery mode, each with a fresh pi process and a fresh in-process hub, or the hub at
+// PI_DEMO_HUB_URL (which must accept http callbacks to 127.0.0.1 for the webhook mode).
+// Usage: ANTHROPIC_API_KEY=... node scripts/pi-demo.ts   (PI_DEMO_DELIVERY=push|poll|webhook|all, PI_DEMO_MODEL=<provider>/<model>,
+//        PI_DEMO_HUB_URL=http://127.0.0.1:5173 with HUB_ADMIN_TOKEN and HUB_CLIENT_TOKEN matching that hub)
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { startHub } from "../src/hub.ts";
+import { startHub } from "../src/node.ts";
 import { emit, registerShop } from "../mock/service.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -12,8 +14,9 @@ const MODEL = process.env.PI_DEMO_MODEL ?? "anthropic/claude-haiku-5-5";
 const MODES = ["push", "poll", "webhook"] as const;
 const DELIVERY = process.env.PI_DEMO_DELIVERY ?? "all";
 const TIMEOUT_MS = 300_000;
-const ADMIN = "demo-admin";
-const CLIENT_TOKEN = "demo-client-token";
+const EXTERNAL_HUB = process.env.PI_DEMO_HUB_URL?.replace(/\/$/, "");
+const ADMIN = process.env.HUB_ADMIN_TOKEN ?? "dev-admin";
+const CLIENT_TOKEN = process.env.HUB_CLIENT_TOKEN ?? "dev-client";
 const SUBSCRIBE_ARGS = {
   name: "shop.order.created",
   arguments: { customer: "alice" },
@@ -72,7 +75,9 @@ async function runMode(mode: Mode): Promise<void> {
     for (const w of [...waiters]) if (w.pred(r)) waiters.splice(waiters.indexOf(w), 1), w.resolve();
   }
 
-  const hub = await startHub({ port: 0, db: ":memory:", adminToken: ADMIN, clientTokens: `demo:${CLIENT_TOKEN}`, allowPrivateCallbacks: true });
+  const hub = EXTERNAL_HUB
+    ? { url: EXTERNAL_HUB, close: async () => {} }
+    : await startHub({ port: 0, db: ":memory:", adminToken: ADMIN, clientTokens: `demo:${CLIENT_TOKEN}`, allowPrivateCallbacks: true });
   let pi: ReturnType<typeof spawn> | undefined;
   try {
     const { secret } = await registerShop(hub.url, ADMIN);
@@ -114,8 +119,9 @@ async function runMode(mode: Mode): Promise<void> {
     if (!textOf(subscribed.result?.content).includes(`via ${mode}`)) throw new Error(`events_subscribe did not use ${mode}: ${textOf(subscribed.result?.content)}`);
 
     const settledBefore = settledCount();
+    // No eventId: an external hub keeps its log across modes and runs and would store a repeated one once.
     for (const [customer, id, amount] of [["bob", "o-bob-1", 900], ["alice", "o-alice-1", 4200]] as const) {
-      const res = await emit(hub.url, secret, "order.created", { order_id: id, customer, amount, currency: "JPY" }, `evt-${id}`);
+      const res = await emit(hub.url, secret, "order.created", { order_id: id, customer, amount, currency: "JPY" });
       log(`[emit] ${id} for ${customer} -> HTTP ${res.status}`);
       if (res.status >= 300) throw new Error(`emit ${id} failed: ${JSON.stringify(res.body)}`);
     }
