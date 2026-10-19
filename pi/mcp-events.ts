@@ -8,6 +8,12 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const HUB_URL = process.env.MCP_EVENTS_HUB_URL ?? "http://127.0.0.1:8787/mcp";
 const HUB_TOKEN = process.env.MCP_EVENTS_HUB_TOKEN;
+// fetch rejects a header value outside Latin-1 with an opaque "Cannot convert argument to a ByteString"
+// error, so check the one header value people type by hand and say which setting is wrong.
+const TOKEN_ERROR =
+  HUB_TOKEN !== undefined && !/^[\x21-\x7e]+$/.test(HUB_TOKEN)
+    ? "MCP_EVENTS_HUB_TOKEN contains a character that cannot go in an HTTP header (non-ASCII, a space, or a control character). Set it to the token part of one HUB_CLIENT_TOKENS entry on the hub, for example dev-client."
+    : null;
 const DELIVERY = process.env.MCP_EVENTS_DELIVERY;
 const CALLBACK_PORT = Number(process.env.MCP_EVENTS_CALLBACK_PORT ?? 0);
 const TTL_MS = Number(process.env.MCP_EVENTS_TTL_MS ?? 3_600_000);
@@ -53,6 +59,7 @@ class RpcError extends Error {
 let nextId = 1;
 
 function post(method: string, params: Args, signal?: AbortSignal): Promise<Response> {
+  if (TOKEN_ERROR) return Promise.reject(new Error(TOKEN_ERROR));
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",

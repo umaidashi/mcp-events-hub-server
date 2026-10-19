@@ -26,11 +26,11 @@ before(async () => {
 after(() => hub.close());
 
 // The extension reads its env at load time, so each mode gets its own module instance.
-async function loadExtension(t: TestContext, mode: string) {
+async function loadExtension(t: TestContext, mode: string, token = "t") {
   process.env.MCP_EVENTS_HUB_URL = `${hub.url}/mcp`;
-  process.env.MCP_EVENTS_HUB_TOKEN = "t";
+  process.env.MCP_EVENTS_HUB_TOKEN = token;
   process.env.MCP_EVENTS_DELIVERY = mode;
-  const { default: ext } = await import(`../pi/mcp-events.ts?mode=${mode}`);
+  const { default: ext } = await import(`../pi/mcp-events.ts?mode=${mode}&token=${encodeURIComponent(token)}`);
   const tools: Record<string, any> = {}, handlers: Record<string, any> = {}, messages: any[] = [];
   ext({ registerTool: (tool: any) => (tools[tool.name] = tool), on: (e: string, h: any) => (handlers[e] = h), sendMessage: (m: any) => messages.push(m) } as any);
   t.after(() => handlers.session_shutdown?.());
@@ -70,4 +70,15 @@ test("webhook receiver rejects forged, stale and unrouted deliveries", async (t)
   assert.equal(await post(details.callback, wrong), 401, "wrong secret");
   assert.equal(await post(details.callback, { ...wrong, "webhook-timestamp": "1" }), 401, "stale timestamp");
   assert.equal(await post(details.callback.replace(/\/\d+$/, "/999"), wrong), 410, "unknown callback path");
+});
+
+test("a token that cannot go in a header names the setting instead of a ByteString error", async (t) => {
+  const { tools } = await loadExtension(t, "push", "クライアントトークン");
+  for (const call of [() => tools.events_catalog.execute("1", {}), () => tools.events_subscribe.execute("2", filter)]) {
+    await assert.rejects(call, (err: Error) => {
+      assert.match(err.message, /MCP_EVENTS_HUB_TOKEN/);
+      assert.doesNotMatch(err.message, /ByteString|クライアント/, "no opaque fetch error and no echo of the token");
+      return true;
+    });
+  }
 });
