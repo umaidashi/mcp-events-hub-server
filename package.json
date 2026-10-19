@@ -1,0 +1,11 @@
+{
+  "name": "mcp-events-hub-server",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/hub.ts",
+    "test": "node --test test/",
+    "mock": "node mock/service.ts"
+  }
+}
