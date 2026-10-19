@@ -29,6 +29,16 @@ MCP_EVENTS_HUB_URL=http://127.0.0.1:8787/mcp MCP_EVENTS_HUB_TOKEN=dev-client pi 
 
 pi のモデルには `events_catalog`、`events_subscribe`、`events_unsubscribe` の 3 つのツールが見えます。「shop.order.created を customer=alice で購読して、届いたら金額を報告して」のように頼むと、イベントが届くたびに新しいターンが始まります。
 
+拡張は既定で push を使い、ハブが push を出していなければ poll を使います。`MCP_EVENTS_DELIVERY` で配信方式を固定できます。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `MCP_EVENTS_DELIVERY` | push、なければ poll | `push`、`poll`、`webhook` のどれか。ハブが出していない方式を選ぶと購読ツールがエラーを返す |
+| `MCP_EVENTS_CALLBACK_PORT` | `0`(空きポート) | webhook の受け口を開く 127.0.0.1 のポート |
+| `MCP_EVENTS_TTL_MS` | `3600000` | webhook 購読に求める TTL。残り時間の 8 割が過ぎたら最新の cursor で `events/subscribe` を呼び直す |
+
+webhook を選ぶと、拡張は最初の購読で 127.0.0.1 に HTTP サーバーを開き、購読ごとに `/callback/<n>` と `whsec_` secret を作って `events/subscribe` に渡します。ChatGPT と同じ経路をローカルで通すためのもので、ハブは `HUB_ALLOW_PRIVATE_CALLBACKS=1` で起動します。受け口は Standard Webhooks の署名を 5 分の許容幅で検証し、challenge に応答し、イベントを eventId で重複排除します。購読を解除すると `events/unsubscribe` を呼び、最後の購読が終わったらサーバーを閉じます。
+
 ## 設定
 
 | 環境変数 | 既定値 | 内容 |
@@ -70,8 +80,10 @@ pi のモデルには `events_catalog`、`events_subscribe`、`events_unsubscrib
 
 ## 検証
 
-- `npm test` は 27 件のテストで、実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗を確認します。
-- `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。モデルは `PI_DEMO_MODEL` で変えられます。
+- `npm test` は 31 件のテストで、LLM を使いません。`test/hub.test.ts` は実際の HTTP 越しに両方の世代のハンドシェイク、ingest、3 つの配信方式、署名検証、再送、challenge 失敗を確認します。`test/pi-extension.test.ts` は pi の拡張のツールを直接呼び、push、poll、webhook のそれぞれで、条件に合うイベントだけが届き、購読解除後は届かないことと、webhook 受信口が偽造や古い署名を拒否することを確認します。
+- `node scripts/pi-demo.ts` は実際の LLM で pi を動かします。push、poll、webhook の順に、毎回新しいハブと pi を起動します。pi がカタログを見て alice の注文だけを購読し、bob の注文には反応せず、指定した方式で届いた alice の注文で `ORDER o-alice-1 4200 JPY` と返すことを確認します。方式ごとに PASS か FAIL を 1 行出し、1 つでも落ちたら終了コード 1 で終わります。
+  - 既定のモデルは `anthropic/claude-haiku-5-5` で、`ANTHROPIC_API_KEY` が必要です。スクリプトは空の `.data/pi-agent` を `PI_CODING_AGENT_DIR` として pi に渡すので、`~/.pi/agent/auth.json` の claude.ai ログインは使わず、API キーだけで動きます。
+  - `PI_DEMO_DELIVERY=push|poll|webhook|all` で方式を絞れます。`PI_DEMO_MODEL=openai-codex/gpt-5.6-luna` のように Anthropic 以外を指定すると、`~/.pi/agent` のログイン情報を使います。
 
 ## まだやっていないこと
 
