@@ -170,6 +170,56 @@ flowchart LR
   class nodeEntry,nodeDb,cfHub,cfDb,dHub,dDb,dService,dApi,dClient container
 ```
 
+### デプロイ(Cloudflare)
+
+Cloudflare に置いたときの構成です。`cloudflare.config.ts` と `src/worker.ts` をそのまま `cf deploy` した形で、リクエストの流れ、秘密情報と設定の置き場所、外へ出る webhook の線を示します。
+
+```mermaid
+flowchart LR
+  service["<b>上流サービス</b><br/>[Software System]"]
+  operator["<b>運用者のブラウザ</b><br/>[Person]"]
+  pi["<b>pi と拡張</b><br/>[Software System]<br/>push か poll"]
+  chatgpt["<b>ChatGPT など</b><br/>[Software System]<br/>webhook の callback URL を持つ"]
+
+  subgraph cf["Cloudflare"]
+    subgraph worker["Worker: mcp-events-hub"]
+      entry["<b>fetch ハンドラ</b><br/>[Component: src/worker.ts]<br/>全リクエストを ctx.exports.EventsHub.getByName(hub) に渡す"]
+      cfg["<b>設定</b><br/>secret: HUB_ADMIN_TOKEN、HUB_CLIENT_TOKENS<br/>var: HUB_ALLOW_PRIVATE_CALLBACKS=0<br/>flags: nodejs_compat、enable_request_signal"]
+    end
+    subgraph dobj["Durable Object: EventsHub(インスタンスは hub の1つだけ)"]
+      hub["<b>ハブサーバー</b><br/>[Container: createHub]<br/>サービス API、MCP、管理 API"]
+      mem["<b>メモリ上の状態</b><br/>開いている SSE 接続の一覧<br/>webhook の再送タイマー"]
+      db[("<b>SQLite</b><br/>[Durable Object のストレージ]<br/>services、events、subscriptions")]
+    end
+    obs["<b>Workers Logs と Traces</b><br/>observability を有効化"]
+  end
+
+  service -- "POST /services/:id/events<br/>[HTTPS、署名付き]" --> entry
+  operator -- "GET /admin、/admin/api/*<br/>[HTTPS、管理者トークン]" --> entry
+  pi -- "POST /mcp events/stream、events/poll<br/>[HTTPS、Bearer トークン]" --> entry
+  chatgpt -- "POST /mcp events/subscribe<br/>[HTTPS、Bearer トークン]" --> entry
+  entry -- "Durable Object の fetch" --> hub
+  cfg -. "env" .-> hub
+  hub --- mem
+  hub -- "SQL" --> db
+  hub -- "SSE を開いたまま流す" --> pi
+  hub -- "署名付き POST [HTTPS]" --> chatgpt
+  worker -.-> obs
+
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
+  classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#fff
+  classDef note fill:#f5f5f5,stroke:#999,color:#000
+  class operator person
+  class hub,db container
+  class entry component
+  class service,pi,chatgpt external
+  class cfg,mem,obs note
+```
+
+Worker は受け取ったリクエストを渡すだけで、ハブの処理はすべて1つの Durable Object の中で動きます。cursor をログ全体の通し番号にしているので、ログを1か所にまとめています。デプロイは `cloudflare.config.ts` から `cf build` で `.cloudflare/output/v0/` を作り、`cf deploy --secrets-file <ファイル>` で秘密情報と一緒に送ります。
+
 ## 必要なもの
 
 | もの | 使う場面 |
