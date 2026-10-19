@@ -5,7 +5,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "start": "node src/hub.ts",
-    "test": "node --test test/",
+    "test": "node --test 'test/**/*.test.ts'",
     "mock": "node mock/service.ts"
   }
 }
